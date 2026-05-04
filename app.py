@@ -1,47 +1,53 @@
 import streamlit as st
 import pandas as pd
-from serpapi import GoogleSearch
+import requests
 import time
+import json
 
-def get_search_results(keyword, target_domain, api_key, gl="us", hl="en", device="desktop"):
-    for start in [0, 10, 20, 30, 40]:
-        params = {
-            "engine": "google",
+def get_search_results(keyword, target_domain, api_key, gl="us", hl="en"):
+    headers = {
+        'X-API-KEY': api_key,
+        'Content-Type': 'application/json'
+    }
+    
+    # Loop to check the first 3 pages
+    for page in range(1, 4):
+        payload = json.dumps({
             "q": keyword,
-            "location": "United States",
             "gl": gl,
             "hl": hl,
-            "device": device,
-            "start": start,
-            "api_key": api_key
-        }
+            "num": 100,
+            "page": page
+        })
         
         try:
-            search = GoogleSearch(params)
-            results = search.get_dict()
+            response = requests.post("https://google.serper.dev/search", headers=headers, data=payload)
             
-            if "error" in results:
-                error_msg = results.get("error", "")
-                if "Invalid API key" in error_msg:
-                    return "API Key Error", "Please provide a valid SerpApi Key."
-                elif "out of bounds" in error_msg.lower() or "credits" in error_msg.lower():
-                    return "Quota Exceeded", "SerpApi account out of credits or rate limit reached."
-                elif "rate limit" in error_msg.lower():
-                    return "Rate Limit", "Too many requests to SerpApi. Please slow down."
-                else:
-                    return "API Error", error_msg
+            if response.status_code == 403:
+                return "API Key Error", "Unauthorized: Please check your Serper.dev API key."
+            elif response.status_code in [402, 429]:
+                return "Quota Exceeded", "Serper account out of credits or rate limit reached."
+            elif response.status_code != 200:
+                return "API Error", f"HTTP {response.status_code}"
                 
-            organic_results = results.get("organic_results", [])
+            results = response.json()
+            organic_results = results.get("organic", [])
             
             for result in organic_results:
                 link = result.get("link", "")
+                
+                # Check if target domain is inside the found URL (fuzzy matching for subdomains)
                 if target_domain.lower() in link.lower():
                     return result.get("position", "N/A"), link
                     
+            # If no organic results are returned or less than 100 hit, we can safely exit the loop early
+            if len(organic_results) < 100:
+                break
+                
         except Exception as e:
             return "Error", str(e)
             
-    return "Not in Top 50", "N/A"
+    return "Not in Top 300", "N/A"
 
 def init_session_state():
     if "results_data" not in st.session_state:
@@ -75,7 +81,7 @@ def main():
     """, unsafe_allow_html=True)
     
     st.title("⚡ SERP Pulse")
-    st.markdown("Advanced Search Engine Ranking Analysis")
+    st.markdown("Advanced Search Engine Ranking Analysis using Serper.dev")
 
     # --- Sidebar Configuration ---
     with st.sidebar:
@@ -83,18 +89,17 @@ def main():
         
         with st.expander("🔑 API & Domain", expanded=True):
             target_domain = st.text_input("Target Domain", placeholder="mysite.com", help="Domain to track (e.g., mysite.com)")
-            serpapi_key = st.text_input("SerpApi Key", type="password", help="Your SerpApi private key")
+            serpapi_key = st.text_input("Serper.dev API Key", type="password", help="Your Serper.dev private key")
             
         with st.expander("🌍 Search Parameters", expanded=False):
             country_code = st.selectbox("Country (gl)", ["us", "uk", "ca", "au", "in"], index=0)
             language_code = st.selectbox("Language (hl)", ["en", "es", "fr", "de"], index=0)
-            device_type = st.selectbox("Device", ["desktop", "mobile", "tablet"], index=0)
             
         st.divider()
         st.markdown("### 📝 Instructions")
         st.markdown(
-            "1. **Configure API**: Set your Target Domain and SerpApi Key.\n"
-            "2. **Search Settings**: Adjust location and device if needed.\n"
+            "1. **Configure API**: Set your Target Domain and Serper.dev Key.\n"
+            "2. **Search Settings**: Adjust location and details if needed.\n"
             "3. **Upload**: Use the Tracker panel to upload keyword CSV.\n"
             "4. **Analyze**: View results and visual metrics."
         )
@@ -126,7 +131,7 @@ def main():
 
         with col2:
             st.subheader("2. Execution")
-            st.markdown(f"**Target Domain:** `{target_domain or 'Not set'}` | **Keywords:** `{len(keywords)}`")
+            st.markdown(f"**Target Domain:** {target_domain or 'Not set'} | **Keywords:** {len(keywords)}")
             
             run_btn = st.button("🚀 Start Rank Tracking", type="primary", use_container_width=True)
             
@@ -134,7 +139,7 @@ def main():
                 if not target_domain:
                     st.error("Please configure the Target Domain in the sidebar.")
                 elif not serpapi_key:
-                    st.error("Please provide your SerpApi Key in the sidebar.")
+                    st.error("Please provide your Serper.dev Key in the sidebar.")
                 elif not keywords:
                     st.warning("Please upload a CSV containing keywords first.")
                 else:
@@ -147,7 +152,7 @@ def main():
                         for i, keyword in enumerate(keywords):
                             status_text.text(f"Fetching: '{keyword}' ({i+1}/{len(keywords)})")
                             
-                            rank, url = get_search_results(keyword, target_domain, serpapi_key, country_code, language_code, device_type)
+                            rank, url = get_search_results(keyword, target_domain, serpapi_key, country_code, language_code)
                             
                             st.session_state.results_data.append({
                                 "Keyword": keyword,
@@ -172,17 +177,13 @@ def main():
             
             total_keywords = len(results_df)
             top_3 = len(numeric_ranks[numeric_ranks <= 3]) if not numeric_ranks.empty else 0
-            top_10 = len(numeric_ranks[numeric_ranks <= 10]) if not numeric_ranks.empty else 0
             avg_pos = round(numeric_ranks.mean(), 1) if not numeric_ranks.empty else "N/A"
-            unranked = total_keywords - len(numeric_ranks)
             
-            # Metrics Row
-            m1, m2, m3, m4, m5 = st.columns(5)
+            # Metrics Row (Total Keywords, Top 3, Average Rank)
+            m1, m2, m3 = st.columns(3)
             m1.metric("Total Keywords", total_keywords)
             m2.metric("Top 3", top_3)
-            m3.metric("Top 10", top_10)
-            m4.metric("Avg Position", avg_pos)
-            m5.metric("Unranked (50+)", unranked)
+            m3.metric("Average Rank", avg_pos)
             
             st.divider()
             
@@ -191,11 +192,15 @@ def main():
             
             with chart_col:
                 st.subheader("Visibility Summary")
+                
+                top_10 = len(numeric_ranks[numeric_ranks <= 10]) if not numeric_ranks.empty else 0
+                unranked = total_keywords - len(numeric_ranks)
+                
                 # Prepare data for a simple bar chart
                 dist = {
                     "Top 3": top_3,
                     "Pos 4-10": top_10 - top_3,
-                    "Pos 11-50": len(numeric_ranks[numeric_ranks > 10]),
+                    "Pos 11-300": len(numeric_ranks[numeric_ranks > 10]),
                     "Unranked": unranked
                 }
                 dist_df = pd.DataFrame(list(dist.items()), columns=["Range", "Count"])
