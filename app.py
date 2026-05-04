@@ -29,7 +29,6 @@ def check_subdomain_match(target_domain, result_link):
         if not result_link.startswith(('http://', 'https://')):
             result_link = 'http://' + result_link
         link_domain = urlparse(result_link).netloc.lower()
-        # Matches domain.com or sub.domain.com
         return root in link_domain or link_domain.endswith('.' + root)
     except:
         return root in result_link.lower()
@@ -40,57 +39,63 @@ def get_search_results(keyword, target_domain, api_key, gl="us", hl="en"):
         'Content-Type': 'application/json'
     }
     
-    # Passing num: 100 directly fetches the top 100 organic results in a single call.
-    payload = json.dumps({
-        "q": keyword,
-        "gl": gl,
-        "hl": hl,
-        "num": 100
-    })
+    feature_str = "Standard"
     
-    try:
-        response = requests.post("https://google.serper.dev/search", headers=headers, data=payload)
+    # Loop through up to 10 pages to ensure accurate top 100 coverage
+    for page in range(1, 11):
+        payload = json.dumps({
+            "q": keyword,
+            "gl": gl,
+            "hl": hl,
+            "page": page,
+            "num": 10
+        })
         
-        if response.status_code == 403:
-            return {"error": "API Key Error", "msg": "Unauthorized: Please check your Serper.dev API key."}
-        elif response.status_code in [402, 429]:
-            return {"error": "Quota Exceeded", "msg": "Serper account out of credits or rate limit reached."}
-        elif response.status_code != 200:
-            return {"error": "API Error", "msg": f"HTTP {response.status_code}"}
+        try:
+            response = requests.post("https://google.serper.dev/search", headers=headers, data=payload)
             
-        results = response.json()
-        organic_results = results.get("organic", [])
-        
-        # SERP Feature classification
-        features = []
-        if "answerBox" in results:
-            features.append("Featured Snippet")
-        if "places" in results:
-            features.append("Local Pack")
-        if "topStories" in results:
-            features.append("Top Stories")
+            if response.status_code == 403:
+                return {"error": "API Key Error", "msg": "Unauthorized: Please check your Serper.dev API key."}
+            elif response.status_code in [402, 429]:
+                return {"error": "Quota Exceeded", "msg": "Serper account out of credits or rate limit reached."}
+            elif response.status_code != 200:
+                continue
+                
+            results = response.json()
+            organic_results = results.get("organic", [])
             
-        feature_str = ", ".join(features) if features else "Standard"
-
-        for result in organic_results:
-            link = result.get("link", "")
-            if check_subdomain_match(target_domain, link):
-                return {
-                    "position": result.get("position", 101),
-                    "url": link,
-                    "features": feature_str
-                }
+            if page == 1:
+                features = []
+                if "answerBox" in results:
+                    features.append("Featured Snippet")
+                if "places" in results:
+                    features.append("Local Pack")
+                if "topStories" in results:
+                    features.append("Top Stories")
+                feature_str = ", ".join(features) if features else "Standard"
                 
-        # 101 signifies it was not found in the Top 100
-        return {"position": 101, "url": "N/A", "features": feature_str}
+            if not organic_results:
+                break
                 
-    except Exception as e:
-        return {"error": "Error", "msg": str(e)}
+            for result in organic_results:
+                link = result.get("link", "")
+                if check_subdomain_match(target_domain, link):
+                    return {
+                        "position": result.get("position", (page-1)*10 + organic_results.index(result) + 1),
+                        "url": link,
+                        "features": feature_str
+                    }
+                    
+        except Exception as e:
+            if page == 1:
+                return {"error": "Error", "msg": str(e)}
+            continue
+            
+    return {"position": 101, "url": "N/A", "features": feature_str}
 
 def render_styling():
     st.markdown("""
         <style>
-        /* Enterprise Dark Theme */
         .stApp {
             background-color: #0E1117;
             color: #FAFAFA;
@@ -158,7 +163,6 @@ def main():
     st.title("🎯 AI Keyword Tracker")
     st.markdown("Enterprise-grade SEO tracking powered by AI and Serper.dev")
 
-    # --- Sidebar (Configuration area) ---
     with st.sidebar:
         st.header("⚙️ Configuration")
         target_domain = st.text_input("Target Domain", placeholder="e.g. yourdomain.com", value=st.session_state.domain)
@@ -187,7 +191,6 @@ def main():
 
         run_btn = st.button("🚀 Analyze SERP", type="primary", use_container_width=True)
 
-        # Triggering the run
         if run_btn:
             if not target_domain:
                 st.error("Target Domain is required.")
@@ -228,7 +231,6 @@ def main():
                 progress_bar.empty()
                 st.success("Analysis Complete!")
 
-    # --- Dashboard Tabs ---
     tab1, tab2, tab3 = st.tabs(["📊 Dashboard Overview", "🔍 Keyword Intelligence", "📑 Settings & Exports"])
 
     with tab1:
@@ -236,7 +238,6 @@ def main():
             st.info("Upload keywords and configure settings in the sidebar to generate your dashboard.")
         else:
             df_res = pd.DataFrame(st.session_state.results_data)
-            # Create numeric ranks (filling >100 as 101 to properly sort/group)
             df_res["Rank_Num"] = pd.to_numeric(df_res["Rank"], errors='coerce').fillna(101)
             
             total_kw = len(df_res)
@@ -245,7 +246,6 @@ def main():
             top_100 = len(df_res[df_res["Rank_Num"] <= 100])
             avg_pos = df_res[df_res["Rank_Num"] <= 100]["Rank_Num"].mean()
             
-            # Visibility metric (Percentage of Top 10 ranks)
             visibility = round((top_10 / total_kw * 100) if total_kw > 0 else 0, 1)
 
             col1, col2, col3, col4 = st.columns(4)
@@ -257,7 +257,7 @@ def main():
                 st.markdown(f'<div class="metric-container"><div class="metric-label">Top 10 Rankings</div><div class="metric-value">{top_10}</div></div>', unsafe_allow_html=True)
             with col4:
                 avg_display = f"{avg_pos:.1f}" if pd.notna(avg_pos) else "N/A"
-                # Showing a mock Delta HTML for aesthetic purposes based on average presence (Normally integrated via DB history checks)
+                # Mock delta for UI demonstration
                 delta_html = "<span style='color: #10b981; font-size: 1rem; margin-left: 8px;'>▲ 1.2</span>" if pd.notna(avg_pos) else ""
                 st.markdown(f'<div class="metric-container"><div class="metric-label">Avg Position</div><div class="metric-value">{avg_display}{delta_html}</div></div>', unsafe_allow_html=True)
 
@@ -272,7 +272,6 @@ def main():
                 "Not Ranked (>100)": total_kw - top_100
             }
             
-            # Use Plotly for modern UI charting
             dist_df = pd.DataFrame(list(dist.items()), columns=["Position Range", "Count"])
             fig = px.bar(dist_df, x="Position Range", y="Count", color="Position Range", 
                          color_discrete_sequence=['#10b981', '#34d399', '#fbbf24', '#f59e0b', '#ef4444', '#4b5563'],
@@ -287,7 +286,6 @@ def main():
             st.subheader("Keyword Intelligence Data")
             df_res_display = pd.DataFrame(st.session_state.results_data)
             
-            # Map the color to cells dynamically based on traffic light logic rules
             styled_df = df_res_display.style.map(color_coding, subset=['Rank'])
             st.dataframe(styled_df, use_container_width=True, height=500)
 
@@ -296,7 +294,7 @@ def main():
         if not st.session_state.results_data:
             st.info("No data to export.")
         else:
-            st.markdown("Export your complete SERP intelligence report as a CSV file to manipulate offline.")
+            st.markdown("Export your complete SERP intelligence report as a CSV file.")
             df_export = pd.DataFrame(st.session_state.results_data)
             csv = df_export.to_csv(index=False).encode('utf-8')
             st.download_button(
