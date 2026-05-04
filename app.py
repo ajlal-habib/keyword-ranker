@@ -59,10 +59,8 @@ def main():
         
         st.markdown("### 📝 Instructions")
         st.markdown(
-            "1. **Configure**: Set your Target Domain and API Key above.
-"
-            "2. **Upload**: Provide a CSV file containing your keywords.
-"
+            "1. **Configure**: Set your Target Domain and API Key above.\n"
+            "2. **Upload**: Provide a CSV file containing your keywords.\n"
             "3. **Launch**: Click the **Run Tracker** button."
         )
 
