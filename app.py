@@ -10,44 +10,35 @@ def get_search_results(keyword, target_domain, api_key, gl="us", hl="en"):
         'Content-Type': 'application/json'
     }
     
-    # Loop to check the first 3 pages
-    for page in range(1, 4):
-        payload = json.dumps({
-            "q": keyword,
-            "gl": gl,
-            "hl": hl,
-            "num": 100,
-            "page": page
-        })
+    payload = json.dumps({
+        "q": keyword,
+        "gl": gl,
+        "hl": hl,
+        "num": 100
+    })
+    
+    try:
+        response = requests.post("https://google.serper.dev/search", headers=headers, data=payload)
         
-        try:
-            response = requests.post("https://google.serper.dev/search", headers=headers, data=payload)
+        if response.status_code == 403:
+            return "API Key Error", "Unauthorized: Please check your Serper.dev API key."
+        elif response.status_code == 402 or response.status_code == 429:
+            return "Quota Exceeded", "Serper account out of credits or rate limit reached."
+        elif response.status_code != 200:
+            return "API Error", f"HTTP {response.status_code}"
             
-            if response.status_code == 403:
-                return "API Key Error", "Unauthorized: Please check your Serper.dev API key."
-            elif response.status_code in [402, 429]:
-                return "Quota Exceeded", "Serper account out of credits or rate limit reached."
-            elif response.status_code != 200:
-                return "API Error", f"HTTP {response.status_code}"
+        results = response.json()
+        organic_results = results.get("organic", [])
+        
+        for result in organic_results:
+            link = result.get("link", "")
+            if target_domain.lower() in link.lower():
+                return result.get("position", "N/A"), link
                 
-            results = response.json()
-            organic_results = results.get("organic", [])
+    except Exception as e:
+        return "Error", str(e)
             
-            for result in organic_results:
-                link = result.get("link", "")
-                
-                # Check if target domain is inside the found URL (fuzzy matching for subdomains)
-                if target_domain.lower() in link.lower():
-                    return result.get("position", "N/A"), link
-                    
-            # If no organic results are returned or less than 100 hit, we can safely exit the loop early
-            if len(organic_results) < 100:
-                break
-                
-        except Exception as e:
-            return "Error", str(e)
-            
-    return "Not in Top 300", "N/A"
+    return "Not in Top 100", "N/A"
 
 def init_session_state():
     if "results_data" not in st.session_state:
@@ -177,13 +168,17 @@ def main():
             
             total_keywords = len(results_df)
             top_3 = len(numeric_ranks[numeric_ranks <= 3]) if not numeric_ranks.empty else 0
+            top_10 = len(numeric_ranks[numeric_ranks <= 10]) if not numeric_ranks.empty else 0
             avg_pos = round(numeric_ranks.mean(), 1) if not numeric_ranks.empty else "N/A"
+            unranked = total_keywords - len(numeric_ranks)
             
-            # Metrics Row (Total Keywords, Top 3, Average Rank)
-            m1, m2, m3 = st.columns(3)
+            # Metrics Row
+            m1, m2, m3, m4, m5 = st.columns(5)
             m1.metric("Total Keywords", total_keywords)
             m2.metric("Top 3", top_3)
-            m3.metric("Average Rank", avg_pos)
+            m3.metric("Top 10", top_10)
+            m4.metric("Avg Position", avg_pos)
+            m5.metric("Unranked (>100)", unranked)
             
             st.divider()
             
@@ -192,15 +187,11 @@ def main():
             
             with chart_col:
                 st.subheader("Visibility Summary")
-                
-                top_10 = len(numeric_ranks[numeric_ranks <= 10]) if not numeric_ranks.empty else 0
-                unranked = total_keywords - len(numeric_ranks)
-                
                 # Prepare data for a simple bar chart
                 dist = {
                     "Top 3": top_3,
                     "Pos 4-10": top_10 - top_3,
-                    "Pos 11-300": len(numeric_ranks[numeric_ranks > 10]),
+                    "Pos 11-100": len(numeric_ranks[numeric_ranks > 10]),
                     "Unranked": unranked
                 }
                 dist_df = pd.DataFrame(list(dist.items()), columns=["Range", "Count"])
