@@ -23,16 +23,6 @@ def get_root_domain(url_or_domain):
     except:
         return str(url_or_domain).lower()
 
-def check_subdomain_match(target_domain, result_link):
-    root = target_domain.lower()
-    try:
-        if not result_link.startswith(('http://', 'https://')):
-            result_link = 'http://' + result_link
-        link_domain = urlparse(result_link).netloc.lower()
-        return root in link_domain or link_domain.endswith('.' + root)
-    except:
-        return root in result_link.lower()
-
 def get_search_results(keyword, target_domain, api_key, gl="us", hl="en"):
     headers = {
         'X-API-KEY': api_key,
@@ -40,15 +30,14 @@ def get_search_results(keyword, target_domain, api_key, gl="us", hl="en"):
     }
     
     feature_str = "Standard"
+    global_rank = 0
     
-    # Loop through up to 10 pages to ensure accurate top 100 coverage
-    for page in range(1, 11):
+    for page in range(1, 11): # Loop precisely 10 pages (top 100 results)
         payload = json.dumps({
             "q": keyword,
             "gl": gl,
             "hl": hl,
-            "page": page,
-            "num": 10
+            "page": page
         })
         
         try:
@@ -78,13 +67,19 @@ def get_search_results(keyword, target_domain, api_key, gl="us", hl="en"):
                 break
                 
             for result in organic_results:
+                global_rank += 1
                 link = result.get("link", "")
-                if check_subdomain_match(target_domain, link):
+                
+                # Strict subdomain and domain fuzzy matching requested by user
+                if target_domain.lower() in link.lower():
                     return {
-                        "position": result.get("position", (page-1)*10 + organic_results.index(result) + 1),
+                        "position": global_rank,
                         "url": link,
                         "features": feature_str
                     }
+                    
+                if global_rank >= 100:
+                    return {"position": 101, "url": "N/A", "features": feature_str}
                     
         except Exception as e:
             if page == 1:
