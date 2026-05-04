@@ -1,3 +1,4 @@
 streamlit
-google-search-results
+requests
 pandas
+plotly
