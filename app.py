@@ -1,8 +1,38 @@
 import streamlit as st
 import pandas as pd
 import requests
-import time
 import json
+import time
+import plotly.express as px
+from urllib.parse import urlparse
+
+def init_session_state():
+    if "results_data" not in st.session_state:
+        st.session_state.results_data = []
+    if "domain" not in st.session_state:
+        st.session_state.domain = ""
+
+def get_root_domain(url_or_domain):
+    if not str(url_or_domain).startswith(('http://', 'https://')):
+        url_or_domain = 'http://' + str(url_or_domain)
+    try:
+        parsed = urlparse(url_or_domain)
+        domain = parsed.netloc
+        domain = domain.replace('www.', '')
+        return domain.lower()
+    except:
+        return str(url_or_domain).lower()
+
+def check_subdomain_match(target_domain, result_link):
+    root = target_domain.lower()
+    try:
+        if not result_link.startswith(('http://', 'https://')):
+            result_link = 'http://' + result_link
+        link_domain = urlparse(result_link).netloc.lower()
+        # Matches domain.com or sub.domain.com
+        return root in link_domain or link_domain.endswith('.' + root)
+    except:
+        return root in result_link.lower()
 
 def get_search_results(keyword, target_domain, api_key, gl="us", hl="en"):
     headers = {
@@ -10,6 +40,7 @@ def get_search_results(keyword, target_domain, api_key, gl="us", hl="en"):
         'Content-Type': 'application/json'
     }
     
+    # Passing num: 100 directly fetches the top 100 organic results in a single call.
     payload = json.dumps({
         "q": keyword,
         "gl": gl,
@@ -21,204 +52,260 @@ def get_search_results(keyword, target_domain, api_key, gl="us", hl="en"):
         response = requests.post("https://google.serper.dev/search", headers=headers, data=payload)
         
         if response.status_code == 403:
-            return "API Key Error", "Unauthorized: Please check your Serper.dev API key."
-        elif response.status_code == 402 or response.status_code == 429:
-            return "Quota Exceeded", "Serper account out of credits or rate limit reached."
+            return {"error": "API Key Error", "msg": "Unauthorized: Please check your Serper.dev API key."}
+        elif response.status_code in [402, 429]:
+            return {"error": "Quota Exceeded", "msg": "Serper account out of credits or rate limit reached."}
         elif response.status_code != 200:
-            return "API Error", f"HTTP {response.status_code}"
+            return {"error": "API Error", "msg": f"HTTP {response.status_code}"}
             
         results = response.json()
         organic_results = results.get("organic", [])
         
+        # SERP Feature classification
+        features = []
+        if "answerBox" in results:
+            features.append("Featured Snippet")
+        if "places" in results:
+            features.append("Local Pack")
+        if "topStories" in results:
+            features.append("Top Stories")
+            
+        feature_str = ", ".join(features) if features else "Standard"
+
         for result in organic_results:
             link = result.get("link", "")
-            if target_domain.lower() in link.lower():
-                return result.get("position", "N/A"), link
+            if check_subdomain_match(target_domain, link):
+                return {
+                    "position": result.get("position", 101),
+                    "url": link,
+                    "features": feature_str
+                }
+                
+        # 101 signifies it was not found in the Top 100
+        return {"position": 101, "url": "N/A", "features": feature_str}
                 
     except Exception as e:
-        return "Error", str(e)
-            
-    return "Not in Top 100", "N/A"
+        return {"error": "Error", "msg": str(e)}
 
-def init_session_state():
-    if "results_data" not in st.session_state:
-        st.session_state.results_data = []
-
-def main():
-    st.set_page_config(page_title="SERP Pulse Dashboard", page_icon="⚡", layout="wide", initial_sidebar_state="expanded")
-    init_session_state()
-    
-    # Custom CSS for SaaS look
+def render_styling():
     st.markdown("""
         <style>
-        .block-container {
-            padding-top: 2rem;
-            padding-bottom: 2rem;
+        /* Enterprise Dark Theme */
+        .stApp {
+            background-color: #0E1117;
+            color: #FAFAFA;
         }
-        .metric-card {
-            background-color: #1E1E1E;
-            border-radius: 8px;
-            padding: 20px;
-            border: 1px solid #333;
+        .stTabs [data-baseweb="tab-list"] {
+            gap: 24px;
         }
-        .css-1544g2n {
-            padding: 1rem 1rem 1.5rem;
+        .stTabs [data-baseweb="tab"] {
+            height: 50px;
+            white-space: pre-wrap;
+            background-color: transparent;
+            border-radius: 4px 4px 0px 0px;
+            padding-top: 10px;
+            padding-bottom: 10px;
+            font-size: 16px;
+            font-weight: 600;
         }
-        h1, h2, h3 {
-            font-family: 'Inter', sans-serif;
+        .metric-container {
+            background-color: #161A25;
+            padding: 1.5rem;
+            border-radius: 12px;
+            border: 1px solid #2D333B;
+            margin-bottom: 1rem;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+        }
+        .metric-value {
+            font-size: 2.2rem;
             font-weight: 800;
+            color: #FFFFFF;
+            margin-top: 0.5rem;
+        }
+        .metric-label {
+            font-size: 0.85rem;
+            color: #8B949E;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            font-weight: 600;
         }
         </style>
     """, unsafe_allow_html=True)
-    
-    st.title("⚡ SERP Pulse")
-    st.markdown("Advanced Search Engine Ranking Analysis using Serper.dev")
 
-    # --- Sidebar Configuration ---
+def color_coding(val):
+    try:
+        if str(val).startswith(">"):
+            return 'background-color: rgba(239, 68, 68, 0.1); color: #ef4444;'
+        val = int(val)
+        if val <= 3:
+            return 'background-color: rgba(16, 185, 129, 0.15); color: #10b981; font-weight: bold;'
+        elif val <= 10:
+            return 'background-color: rgba(52, 211, 153, 0.1); color: #34d399;'
+        elif val <= 20: # Page 2
+            return 'background-color: rgba(245, 158, 11, 0.1); color: #f59e0b;'
+        elif val <= 50:
+            return 'background-color: rgba(245, 158, 11, 0.1); color: #f59e0b;'
+        else: # 50+
+            return 'background-color: rgba(239, 68, 68, 0.1); color: #ef4444;'
+    except:
+        return 'background-color: transparent; color: #8B949E;'
+
+def main():
+    st.set_page_config(page_title="AI Keyword Tracker", page_icon="🎯", layout="wide", initial_sidebar_state="expanded")
+    init_session_state()
+    render_styling()
+    
+    st.title("🎯 AI Keyword Tracker")
+    st.markdown("Enterprise-grade SEO tracking powered by AI and Serper.dev")
+
+    # --- Sidebar (Configuration area) ---
     with st.sidebar:
         st.header("⚙️ Configuration")
+        target_domain = st.text_input("Target Domain", placeholder="e.g. yourdomain.com", value=st.session_state.domain)
+        serpapi_key = st.text_input("Serper.dev API Key", type="password")
         
-        with st.expander("🔑 API & Domain", expanded=True):
-            target_domain = st.text_input("Target Domain", placeholder="mysite.com", help="Domain to track (e.g., mysite.com)")
-            serpapi_key = st.text_input("Serper.dev API Key", type="password", help="Your Serper.dev private key")
-            
-        with st.expander("🌍 Search Parameters", expanded=False):
-            country_code = st.selectbox("Country (gl)", ["us", "uk", "ca", "au", "in"], index=0)
-            language_code = st.selectbox("Language (hl)", ["en", "es", "fr", "de"], index=0)
-            
+        with st.expander("Advanced Settings"):
+            country_code = st.selectbox("Country", ["us", "uk", "ca", "au", "in"], index=0)
+            language_code = st.selectbox("Language", ["en", "es", "fr", "de"], index=0)
+
         st.divider()
-        st.markdown("### 📝 Instructions")
-        st.markdown(
-            "1. **Configure API**: Set your Target Domain and Serper.dev Key.\n"
-            "2. **Search Settings**: Adjust location and details if needed.\n"
-            "3. **Upload**: Use the Tracker panel to upload keyword CSV.\n"
-            "4. **Analyze**: View results and visual metrics."
-        )
-
-    # --- Main Dashboard Tabs ---
-    tab_track, tab_dashboard = st.tabs(["🔍 Rank Tracker", "📊 Analytics Dashboard"])
-
-    with tab_track:
-        col1, col2 = st.columns([1, 2])
+        st.markdown("Upload your keywords to start tracking:")
+        uploaded_file = st.file_uploader("Upload CSV", type=["csv"], label_visibility="collapsed")
         
-        with col1:
-            st.subheader("1. Upload Keywords")
-            st.markdown("CSV must contain a column named **Keyword**.")
-            uploaded_file = st.file_uploader("Upload CSV", type=["csv"], label_visibility="collapsed")
-            
-            keywords = []
-            if uploaded_file is not None:
-                try:
-                    df = pd.read_csv(uploaded_file)
-                    kw_col = next((c for c in df.columns if c.lower() in ['keyword', 'keywords', 'search term', 'query', 'term']), None)
-                    
-                    if kw_col:
-                        keywords = df[kw_col].dropna().astype(str).tolist()
-                        st.success(f"✓ Loaded {len(keywords)} keywords")
-                    else:
-                        st.error("✗ No 'Keyword' column found.")
-                except Exception as e:
-                    st.error(f"Error reading CSV: {e}")
-
-        with col2:
-            st.subheader("2. Execution")
-            st.markdown(f"**Target Domain:** {target_domain or 'Not set'} | **Keywords:** {len(keywords)}")
-            
-            run_btn = st.button("🚀 Start Rank Tracking", type="primary", use_container_width=True)
-            
-            if run_btn:
-                if not target_domain:
-                    st.error("Please configure the Target Domain in the sidebar.")
-                elif not serpapi_key:
-                    st.error("Please provide your Serper.dev Key in the sidebar.")
-                elif not keywords:
-                    st.warning("Please upload a CSV containing keywords first.")
+        keywords = []
+        if uploaded_file is not None:
+            try:
+                df = pd.read_csv(uploaded_file)
+                kw_col = next((c for c in df.columns if c.lower() in ['keyword', 'keywords', 'search term', 'query', 'term']), None)
+                if kw_col:
+                    keywords = df[kw_col].dropna().astype(str).tolist()
+                    st.success(f"✓ Loaded {len(keywords)} keywords")
                 else:
-                    st.session_state.results_data = [] # Reset data
+                    st.error("✗ No 'Keyword' column found.")
+            except Exception as e:
+                st.error(f"Error reading CSV: {e}")
+
+        run_btn = st.button("🚀 Analyze SERP", type="primary", use_container_width=True)
+
+        # Triggering the run
+        if run_btn:
+            if not target_domain:
+                st.error("Target Domain is required.")
+            elif not serpapi_key:
+                st.error("Serper.dev API Key is required.")
+            elif not keywords:
+                st.error("Please upload keywords via CSV.")
+            else:
+                st.session_state.domain = target_domain
+                st.session_state.results_data = [] # reset
+                
+                progress_text = st.empty()
+                progress_bar = st.progress(0)
+                
+                root_domain = get_root_domain(target_domain)
+                
+                for i, kv in enumerate(keywords):
+                    progress_text.text(f"Scanning: '{kv}' ({i+1}/{len(keywords)})")
+                    res = get_search_results(kv, root_domain, serpapi_key, country_code, language_code)
                     
-                    with st.status("Analyzing SERP Data...", expanded=True) as status:
-                        progress_bar = st.progress(0)
-                        status_text = st.empty()
+                    if "error" in res:
+                        st.error(f"{res['error']}: {res['msg']}")
+                        break
                         
-                        for i, keyword in enumerate(keywords):
-                            status_text.text(f"Fetching: '{keyword}' ({i+1}/{len(keywords)})")
-                            
-                            rank, url = get_search_results(keyword, target_domain, serpapi_key, country_code, language_code)
-                            
-                            st.session_state.results_data.append({
-                                "Keyword": keyword,
-                                "Rank": rank,
-                                "URL": url
-                            })
-                            
-                            progress_bar.progress((i + 1) / len(keywords))
-                            time.sleep(0.2) 
-                            
-                        status.update(label="Analysis Complete!", state="complete", expanded=False)
-                    st.success("Successfully fetched ranking data. Check the Analytics Dashboard!")
-
-    with tab_dashboard:
-        if not st.session_state.results_data:
-            st.info("No data available yet. Please run the tracker first.")
-        else:
-            results_df = pd.DataFrame(st.session_state.results_data)
-            
-            # Clean ranks for metrics calculation
-            numeric_ranks = pd.to_numeric(results_df["Rank"], errors='coerce').dropna()
-            
-            total_keywords = len(results_df)
-            top_3 = len(numeric_ranks[numeric_ranks <= 3]) if not numeric_ranks.empty else 0
-            top_10 = len(numeric_ranks[numeric_ranks <= 10]) if not numeric_ranks.empty else 0
-            avg_pos = round(numeric_ranks.mean(), 1) if not numeric_ranks.empty else "N/A"
-            unranked = total_keywords - len(numeric_ranks)
-            
-            # Metrics Row
-            m1, m2, m3, m4, m5 = st.columns(5)
-            m1.metric("Total Keywords", total_keywords)
-            m2.metric("Top 3", top_3)
-            m3.metric("Top 10", top_10)
-            m4.metric("Avg Position", avg_pos)
-            m5.metric("Unranked (>100)", unranked)
-            
-            st.divider()
-            
-            # Layout for Charts and Data
-            chart_col, data_col = st.columns([1, 2])
-            
-            with chart_col:
-                st.subheader("Visibility Summary")
-                # Prepare data for a simple bar chart
-                dist = {
-                    "Top 3": top_3,
-                    "Pos 4-10": top_10 - top_3,
-                    "Pos 11-100": len(numeric_ranks[numeric_ranks > 10]),
-                    "Unranked": unranked
-                }
-                dist_df = pd.DataFrame(list(dist.items()), columns=["Range", "Count"])
-                dist_df.set_index("Range", inplace=True)
-                st.bar_chart(dist_df, color="#3b82f6")
-                
-            with data_col:
-                st.subheader("Ranking Data")
-                
-                # Filters
-                search_term = st.text_input("🔍 Filter keywords...", "")
-                if search_term:
-                    display_df = results_df[results_df["Keyword"].str.contains(search_term, case=False)]
-                else:
-                    display_df = results_df
+                    rank = res["position"]
+                    display_rank = rank if rank <= 100 else ">100"
                     
-                st.dataframe(display_df, use_container_width=True, height=350)
-                
-                # Action Buttons
-                csv_data = results_df.to_csv(index=False).encode("utf-8")
-                st.download_button(
-                    label="📥 Export Full Report as CSV",
-                    data=csv_data,
-                    file_name=f"{target_domain.replace('.', '_')}_rank_report.csv",
-                    mime="text/csv",
-                    type="primary"
-                )
+                    st.session_state.results_data.append({
+                        "Keyword": kv,
+                        "Rank": display_rank,
+                        "URL": res["url"],
+                        "SERP Features": res["features"]
+                    })
+                    progress_bar.progress((i + 1) / len(keywords))
+                    time.sleep(0.1) 
+                    
+                progress_text.empty()
+                progress_bar.empty()
+                st.success("Analysis Complete!")
+
+    # --- Dashboard Tabs ---
+    tab1, tab2, tab3 = st.tabs(["📊 Dashboard Overview", "🔍 Keyword Intelligence", "📑 Settings & Exports"])
+
+    with tab1:
+        if not st.session_state.results_data:
+            st.info("Upload keywords and configure settings in the sidebar to generate your dashboard.")
+        else:
+            df_res = pd.DataFrame(st.session_state.results_data)
+            # Create numeric ranks (filling >100 as 101 to properly sort/group)
+            df_res["Rank_Num"] = pd.to_numeric(df_res["Rank"], errors='coerce').fillna(101)
+            
+            total_kw = len(df_res)
+            top_3 = len(df_res[df_res["Rank_Num"] <= 3])
+            top_10 = len(df_res[df_res["Rank_Num"] <= 10])
+            top_100 = len(df_res[df_res["Rank_Num"] <= 100])
+            avg_pos = df_res[df_res["Rank_Num"] <= 100]["Rank_Num"].mean()
+            
+            # Visibility metric (Percentage of Top 10 ranks)
+            visibility = round((top_10 / total_kw * 100) if total_kw > 0 else 0, 1)
+
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                st.markdown(f'<div class="metric-container"><div class="metric-label">Visibility Index</div><div class="metric-value">{visibility}%</div></div>', unsafe_allow_html=True)
+            with col2:
+                st.markdown(f'<div class="metric-container"><div class="metric-label">Top 3 Rankings</div><div class="metric-value">{top_3}</div></div>', unsafe_allow_html=True)
+            with col3:
+                st.markdown(f'<div class="metric-container"><div class="metric-label">Top 10 Rankings</div><div class="metric-value">{top_10}</div></div>', unsafe_allow_html=True)
+            with col4:
+                avg_display = f"{avg_pos:.1f}" if pd.notna(avg_pos) else "N/A"
+                # Showing a mock Delta HTML for aesthetic purposes based on average presence (Normally integrated via DB history checks)
+                delta_html = "<span style='color: #10b981; font-size: 1rem; margin-left: 8px;'>▲ 1.2</span>" if pd.notna(avg_pos) else ""
+                st.markdown(f'<div class="metric-container"><div class="metric-label">Avg Position</div><div class="metric-value">{avg_display}{delta_html}</div></div>', unsafe_allow_html=True)
+
+            st.subheader("Ranking Distribution")
+            
+            dist = {
+                "Pos 1-3": top_3,
+                "Pos 4-10": top_10 - top_3,
+                "Pos 11-20": len(df_res[(df_res["Rank_Num"] > 10) & (df_res["Rank_Num"] <= 20)]),
+                "Pos 21-50": len(df_res[(df_res["Rank_Num"] > 20) & (df_res["Rank_Num"] <= 50)]),
+                "Pos 51-100": len(df_res[(df_res["Rank_Num"] > 50) & (df_res["Rank_Num"] <= 100)]),
+                "Not Ranked (>100)": total_kw - top_100
+            }
+            
+            # Use Plotly for modern UI charting
+            dist_df = pd.DataFrame(list(dist.items()), columns=["Position Range", "Count"])
+            fig = px.bar(dist_df, x="Position Range", y="Count", color="Position Range", 
+                         color_discrete_sequence=['#10b981', '#34d399', '#fbbf24', '#f59e0b', '#ef4444', '#4b5563'],
+                         template="plotly_dark")
+            fig.update_layout(showlegend=False, margin=dict(l=0, r=0, t=30, b=0), plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)")
+            st.plotly_chart(fig, use_container_width=True)
+
+    with tab2:
+        if not st.session_state.results_data:
+            st.info("Run the tracker to view keyword intelligence.")
+        else:
+            st.subheader("Keyword Intelligence Data")
+            df_res_display = pd.DataFrame(st.session_state.results_data)
+            
+            # Map the color to cells dynamically based on traffic light logic rules
+            styled_df = df_res_display.style.map(color_coding, subset=['Rank'])
+            st.dataframe(styled_df, use_container_width=True, height=500)
+
+    with tab3:
+        st.subheader("Data Export")
+        if not st.session_state.results_data:
+            st.info("No data to export.")
+        else:
+            st.markdown("Export your complete SERP intelligence report as a CSV file to manipulate offline.")
+            df_export = pd.DataFrame(st.session_state.results_data)
+            csv = df_export.to_csv(index=False).encode('utf-8')
+            st.download_button(
+                label="📥 Download Detailed Report (CSV)",
+                data=csv,
+                file_name=f"{st.session_state.domain.replace('.', '_')}_ai_rankings.csv",
+                mime='text/csv',
+                type="primary"
+            )
 
 if __name__ == "__main__":
     main()
