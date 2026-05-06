@@ -252,7 +252,6 @@ def main():
                         "URL": url,
                         "Page Type": page_type,
                         "All Rankings": all_rankings,
-                        "SERP Features": res["features"],
                         "Match Count": len(matches)
                     })
                     progress_bar.progress((i + 1) / len(keywords))
@@ -342,7 +341,7 @@ def main():
             df_res_display = pd.DataFrame(st.session_state.results_data)
             
             # Hide internal data columns from UI
-            cols_to_drop = ['Positions', 'Match Count'] if 'Positions' in df_res_display.columns else []
+            cols_to_drop = ['Positions', 'Match Count', 'SERP Features']
             df_res_display = df_res_display.drop(columns=cols_to_drop, errors='ignore')
             
             styled_df = df_res_display.style.map(color_coding, subset=['Rank'])
