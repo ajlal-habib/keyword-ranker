@@ -23,6 +23,14 @@ def get_root_domain(url_or_domain):
     except:
         return str(url_or_domain).lower()
 
+def determine_page_type(url):
+    if url == "N/A":
+        return "N/A"
+    url_lower = url.lower()
+    if any(keyword in url_lower for keyword in ["/blog/", "/article/", "/post/", "/news/"]):
+        return "Blog"
+    return "Landing Page"
+
 def get_search_results(keyword, target_domain, api_key, gl="us", hl="en"):
     headers = {
         'X-API-KEY': api_key,
@@ -217,6 +225,7 @@ def main():
                         "Keyword": kv,
                         "Rank": display_rank,
                         "URL": res["url"],
+                        "Page Type": determine_page_type(res["url"]),
                         "SERP Features": res["features"]
                     })
                     progress_bar.progress((i + 1) / len(keywords))
@@ -256,23 +265,40 @@ def main():
                 delta_html = "<span style='color: #10b981; font-size: 1rem; margin-left: 8px;'>▲ 1.2</span>" if pd.notna(avg_pos) else ""
                 st.markdown(f'<div class="metric-container"><div class="metric-label">Avg Position</div><div class="metric-value">{avg_display}{delta_html}</div></div>', unsafe_allow_html=True)
 
-            st.subheader("Ranking Distribution")
+            st.subheader("Insights & Distribution")
             
-            dist = {
-                "Pos 1-3": top_3,
-                "Pos 4-10": top_10 - top_3,
-                "Pos 11-20": len(df_res[(df_res["Rank_Num"] > 10) & (df_res["Rank_Num"] <= 20)]),
-                "Pos 21-50": len(df_res[(df_res["Rank_Num"] > 20) & (df_res["Rank_Num"] <= 50)]),
-                "Pos 51-100": len(df_res[(df_res["Rank_Num"] > 50) & (df_res["Rank_Num"] <= 100)]),
-                "Not Ranked (>100)": total_kw - top_100
-            }
+            chart_col1, chart_col2 = st.columns([2, 1])
             
-            dist_df = pd.DataFrame(list(dist.items()), columns=["Position Range", "Count"])
-            fig = px.bar(dist_df, x="Position Range", y="Count", color="Position Range", 
-                         color_discrete_sequence=['#10b981', '#34d399', '#fbbf24', '#f59e0b', '#ef4444', '#4b5563'],
-                         template="plotly_dark")
-            fig.update_layout(showlegend=False, margin=dict(l=0, r=0, t=30, b=0), plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)")
-            st.plotly_chart(fig, use_container_width=True)
+            with chart_col1:
+                st.markdown("##### Ranking Distribution")
+                dist = {
+                    "Pos 1-3": top_3,
+                    "Pos 4-10": top_10 - top_3,
+                    "Pos 11-20": len(df_res[(df_res["Rank_Num"] > 10) & (df_res["Rank_Num"] <= 20)]),
+                    "Pos 21-50": len(df_res[(df_res["Rank_Num"] > 20) & (df_res["Rank_Num"] <= 50)]),
+                    "Pos 51-100": len(df_res[(df_res["Rank_Num"] > 50) & (df_res["Rank_Num"] <= 100)]),
+                    "Not Ranked (>100)": total_kw - top_100
+                }
+                
+                dist_df = pd.DataFrame(list(dist.items()), columns=["Position Range", "Count"])
+                fig = px.bar(dist_df, x="Position Range", y="Count", color="Position Range", 
+                             color_discrete_sequence=['#10b981', '#34d399', '#fbbf24', '#f59e0b', '#ef4444', '#4b5563'],
+                             template="plotly_dark")
+                fig.update_layout(showlegend=False, margin=dict(l=0, r=0, t=30, b=0), plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)")
+                st.plotly_chart(fig, use_container_width=True)
+                
+            with chart_col2:
+                st.markdown("##### Page Types")
+                page_types = df_res[df_res["Page Type"] != "N/A"]["Page Type"].value_counts().reset_index()
+                page_types.columns = ["Page Type", "Count"]
+                if not page_types.empty:
+                    fig_pie = px.pie(page_types, values="Count", names="Page Type", hole=0.7, template="plotly_dark",
+                                     color_discrete_sequence=['#3b82f6', '#8b5cf6'])
+                    fig_pie.update_layout(showlegend=True, margin=dict(l=0, r=0, t=30, b=0), plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+                                          legend=dict(orientation="h", yanchor="bottom", y=-0.2, xanchor="center", x=0.5))
+                    st.plotly_chart(fig_pie, use_container_width=True)
+                else:
+                    st.info("No ranked pages to analyze page types.")
 
     with tab2:
         if not st.session_state.results_data:
