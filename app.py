@@ -39,6 +39,7 @@ def get_search_results(keyword, target_domain, api_key, gl="us", hl="en"):
     
     feature_str = "Standard"
     global_rank = 0
+    matches = []
     
     for page in range(1, 11): # Loop precisely 10 pages (top 100 results)
         payload = json.dumps({
@@ -80,21 +81,17 @@ def get_search_results(keyword, target_domain, api_key, gl="us", hl="en"):
                 
                 # Strict subdomain and domain fuzzy matching requested by user
                 if target_domain.lower() in link.lower():
-                    return {
+                    matches.append({
                         "position": global_rank,
-                        "url": link,
-                        "features": feature_str
-                    }
-                    
-                if global_rank >= 100:
-                    return {"position": 101, "url": "N/A", "features": feature_str}
+                        "url": link
+                    })
                     
         except Exception as e:
             if page == 1:
                 return {"error": "Error", "msg": str(e)}
             continue
             
-    return {"position": 101, "url": "N/A", "features": feature_str}
+    return {"matches": matches, "features": feature_str}
 
 def render_styling():
     st.markdown("""
@@ -142,16 +139,20 @@ def render_styling():
 
 def color_coding(val):
     try:
-        if str(val).startswith(">"):
+        val_str = str(val)
+        if val_str.startswith(">"):
             return 'background-color: rgba(239, 68, 68, 0.1); color: #ef4444;'
-        val = int(val)
-        if val <= 3:
+        
+        first_val = val_str.split(",")[0].replace("Pos", "").strip()
+        val_int = int(first_val)
+        
+        if val_int <= 3:
             return 'background-color: rgba(16, 185, 129, 0.15); color: #10b981; font-weight: bold;'
-        elif val <= 10:
+        elif val_int <= 10:
             return 'background-color: rgba(52, 211, 153, 0.1); color: #34d399;'
-        elif val <= 20: # Page 2
+        elif val_int <= 20: # Page 2
             return 'background-color: rgba(245, 158, 11, 0.1); color: #f59e0b;'
-        elif val <= 50:
+        elif val_int <= 50:
             return 'background-color: rgba(245, 158, 11, 0.1); color: #f59e0b;'
         else: # 50+
             return 'background-color: rgba(239, 68, 68, 0.1); color: #ef4444;'
@@ -176,21 +177,29 @@ def main():
             language_code = st.selectbox("Language", ["en", "es", "fr", "de"], index=0)
 
         st.divider()
-        st.markdown("Upload your keywords to start tracking:")
-        uploaded_file = st.file_uploader("Upload CSV", type=["csv"], label_visibility="collapsed")
+        st.markdown("### 📥 Input Keywords")
+        input_method = st.radio("Choose input method:", ["📄 Upload CSV", "⌨️ Paste Keywords"], label_visibility="collapsed")
         
         keywords = []
-        if uploaded_file is not None:
-            try:
-                df = pd.read_csv(uploaded_file)
-                kw_col = next((c for c in df.columns if c.lower() in ['keyword', 'keywords', 'search term', 'query', 'term']), None)
-                if kw_col:
-                    keywords = df[kw_col].dropna().astype(str).tolist()
+        if input_method == "📄 Upload CSV":
+            uploaded_file = st.file_uploader("Upload CSV", type=["csv"], label_visibility="collapsed")
+            if uploaded_file is not None:
+                try:
+                    df = pd.read_csv(uploaded_file)
+                    kw_col = next((c for c in df.columns if c.lower() in ['keyword', 'keywords', 'search term', 'query', 'term']), None)
+                    if kw_col:
+                        keywords = df[kw_col].dropna().astype(str).tolist()
+                        st.success(f"✓ Loaded {len(keywords)} keywords")
+                    else:
+                        st.error("✗ No 'Keyword' column found.")
+                except Exception as e:
+                    st.error(f"Error reading CSV: {e}")
+        else:
+            pasted_text = st.text_area("Paste keywords (one per line)", height=150, label_visibility="collapsed", placeholder="keyword 1\nkeyword 2\nkeyword 3")
+            if pasted_text:
+                keywords = [k.strip() for k in pasted_text.split('\n') if k.strip()]
+                if keywords:
                     st.success(f"✓ Loaded {len(keywords)} keywords")
-                else:
-                    st.error("✗ No 'Keyword' column found.")
-            except Exception as e:
-                st.error(f"Error reading CSV: {e}")
 
         run_btn = st.button("🚀 Analyze SERP", type="primary", use_container_width=True)
 
@@ -200,7 +209,7 @@ def main():
             elif not serpapi_key:
                 st.error("Serper.dev API Key is required.")
             elif not keywords:
-                st.error("Please upload keywords via CSV.")
+                st.error("Please add keywords to analyze.")
             else:
                 st.session_state.domain = target_domain
                 st.session_state.results_data = [] # reset
@@ -218,15 +227,33 @@ def main():
                         st.error(f"{res['error']}: {res['msg']}")
                         break
                         
-                    rank = res["position"]
-                    display_rank = rank if rank <= 100 else ">100"
+                    matches = res.get("matches", [])
+                    if not matches:
+                        display_rank = ">100"
+                        url = "N/A"
+                        page_type = "N/A"
+                        all_rankings = "N/A"
+                        positions = [101]
+                    else:
+                        positions = [m['position'] for m in matches]
+                        url = matches[0]["url"]
+                        page_type = determine_page_type(url)
+                        all_rankings = "\n".join([f"Pos {m['position']}: {m['url']}" for m in matches])
+                        
+                        if len(matches) > 1:
+                            display_rank = ", ".join([f"Pos {p}" for p in positions])
+                        else:
+                            display_rank = str(positions[0])
                     
                     st.session_state.results_data.append({
                         "Keyword": kv,
                         "Rank": display_rank,
-                        "URL": res["url"],
-                        "Page Type": determine_page_type(res["url"]),
-                        "SERP Features": res["features"]
+                        "Positions": positions,
+                        "URL": url,
+                        "Page Type": page_type,
+                        "All Rankings": all_rankings,
+                        "SERP Features": res["features"],
+                        "Match Count": len(matches)
                     })
                     progress_bar.progress((i + 1) / len(keywords))
                     time.sleep(0.1) 
@@ -242,14 +269,21 @@ def main():
             st.info("Upload keywords and configure settings in the sidebar to generate your dashboard.")
         else:
             df_res = pd.DataFrame(st.session_state.results_data)
-            df_res["Rank_Num"] = pd.to_numeric(df_res["Rank"], errors='coerce').fillna(101)
+            
+            all_positions = []
+            display_positions = []
+            for pos_list in df_res["Positions"]:
+                for p in pos_list:
+                    all_positions.append(p)
+                    if p <= 100:
+                        display_positions.append(p)
             
             total_kw = len(df_res)
-            top_3 = len(df_res[df_res["Rank_Num"] <= 3])
-            top_10 = len(df_res[df_res["Rank_Num"] <= 10])
-            top_100 = len(df_res[df_res["Rank_Num"] <= 100])
-            avg_pos = df_res[df_res["Rank_Num"] <= 100]["Rank_Num"].mean()
+            top_3 = len([p for p in all_positions if p <= 3])
+            top_10 = len([p for p in all_positions if p <= 10])
+            top_100 = len([p for p in all_positions if p <= 100])
             
+            avg_pos = sum(display_positions) / len(display_positions) if display_positions else "N/A"
             visibility = round((top_10 / total_kw * 100) if total_kw > 0 else 0, 1)
 
             col1, col2, col3, col4 = st.columns(4)
@@ -260,9 +294,9 @@ def main():
             with col3:
                 st.markdown(f'<div class="metric-container"><div class="metric-label">Top 10 Rankings</div><div class="metric-value">{top_10}</div></div>', unsafe_allow_html=True)
             with col4:
-                avg_display = f"{avg_pos:.1f}" if pd.notna(avg_pos) else "N/A"
+                avg_display = f"{avg_pos:.1f}" if avg_pos != "N/A" else "N/A"
                 # Mock delta for UI demonstration
-                delta_html = "<span style='color: #10b981; font-size: 1rem; margin-left: 8px;'>▲ 1.2</span>" if pd.notna(avg_pos) else ""
+                delta_html = "<span style='color: #10b981; font-size: 1rem; margin-left: 8px;'>▲ 1.2</span>" if avg_pos != "N/A" else ""
                 st.markdown(f'<div class="metric-container"><div class="metric-label">Avg Position</div><div class="metric-value">{avg_display}{delta_html}</div></div>', unsafe_allow_html=True)
 
             st.subheader("Insights & Distribution")
@@ -274,10 +308,10 @@ def main():
                 dist = {
                     "Pos 1-3": top_3,
                     "Pos 4-10": top_10 - top_3,
-                    "Pos 11-20": len(df_res[(df_res["Rank_Num"] > 10) & (df_res["Rank_Num"] <= 20)]),
-                    "Pos 21-50": len(df_res[(df_res["Rank_Num"] > 20) & (df_res["Rank_Num"] <= 50)]),
-                    "Pos 51-100": len(df_res[(df_res["Rank_Num"] > 50) & (df_res["Rank_Num"] <= 100)]),
-                    "Not Ranked (>100)": total_kw - top_100
+                    "Pos 11-20": len([p for p in all_positions if 10 < p <= 20]),
+                    "Pos 21-50": len([p for p in all_positions if 20 < p <= 50]),
+                    "Pos 51-100": len([p for p in all_positions if 50 < p <= 100]),
+                    "Not Ranked (>100)": total_kw - len([pos_list for pos_list in df_res["Positions"] if min(pos_list) <= 100])
                 }
                 
                 dist_df = pd.DataFrame(list(dist.items()), columns=["Position Range", "Count"])
@@ -306,6 +340,10 @@ def main():
         else:
             st.subheader("Keyword Intelligence Data")
             df_res_display = pd.DataFrame(st.session_state.results_data)
+            
+            # Hide internal data columns from UI
+            cols_to_drop = ['Positions', 'Match Count'] if 'Positions' in df_res_display.columns else []
+            df_res_display = df_res_display.drop(columns=cols_to_drop, errors='ignore')
             
             styled_df = df_res_display.style.map(color_coding, subset=['Rank'])
             st.dataframe(styled_df, use_container_width=True, height=500)
