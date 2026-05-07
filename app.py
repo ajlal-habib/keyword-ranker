@@ -39,48 +39,63 @@ def get_search_results(keyword, target_domain, api_key, gl="us", hl="en"):
     
     feature_str = "Standard"
     
-    payload = json.dumps({
-        "q": keyword,
-        "gl": gl,
-        "hl": hl,
-        "num": 100
-    })
-    
-    try:
-        response = requests.post("https://google.serper.dev/search", headers=headers, data=payload)
+    global_rank = 0
+    for page in range(1, 6): # Loop precisely 5 pages (top 50 results)
+        payload = json.dumps({
+            "q": keyword,
+            "gl": gl,
+            "hl": hl,
+            "page": page
+        })
         
-        if response.status_code == 403:
-            return {"error": "API Key Error", "msg": "Unauthorized: Please check your Serper.dev API key."}
-        elif response.status_code in [402, 429]:
-            return {"error": "Quota Exceeded", "msg": "Serper account out of credits or rate limit reached."}
-        elif response.status_code != 200:
-            return {"error": "API Error", "msg": f"Failed with status code {response.status_code}"}
+        try:
+            response = requests.post("https://google.serper.dev/search", headers=headers, data=payload)
             
-        results = response.json()
-        organic_results = results.get("organic", [])
-        
-        features = []
-        if "answerBox" in results:
-            features.append("Featured Snippet")
-        if "places" in results:
-            features.append("Local Pack")
-        if "topStories" in results:
-            features.append("Top Stories")
-        feature_str = ", ".join(features) if features else "Standard"
-            
-        for result in organic_results:
-            link = result.get("link", "")
-            # Serper usually provides the position attribute, or we can use the index
-            global_rank = result.get("position", organic_results.index(result) + 1)
-            
-            # Strict subdomain and domain fuzzy matching requested by user
-            if target_domain.lower() in link.lower():
-                return {"rank": global_rank, "url": link, "features": feature_str}
+            if response.status_code == 403:
+                return {"error": "API Key Error", "msg": "Unauthorized: Please check your Serper.dev API key."}
+            elif response.status_code in [402, 429]:
+                return {"error": "Quota Exceeded", "msg": "Serper account out of credits or rate limit reached."}
+            elif response.status_code != 200:
+                continue
                 
-    except Exception as e:
-        return {"error": "Error", "msg": str(e)}
+            results = response.json()
+            organic_results = results.get("organic", [])
             
-    return {"rank": ">100", "url": "N/A", "features": feature_str}
+            if page == 1:
+                features = []
+                if "answerBox" in results:
+                    features.append("Featured Snippet")
+                if "places" in results:
+                    features.append("Local Pack")
+                if "topStories" in results:
+                    features.append("Top Stories")
+                feature_str = ", ".join(features) if features else "Standard"
+                
+            if not organic_results:
+                break
+                
+            for result in organic_results:
+                link = result.get("link", "")
+                
+                # Use Serper's position if available, otherwise just use our own counter
+                # Serper's position is usually globally accurate across pages (e.g. 11 for pg 2)
+                rank = result.get("position")
+                if rank is None:
+                    global_rank += 1
+                    rank = global_rank
+                else:
+                    global_rank = max(global_rank, rank)
+                
+                # Strict subdomain and domain fuzzy matching requested by user
+                if target_domain.lower() in link.lower():
+                    return {"rank": rank, "url": link, "features": feature_str}
+                    
+        except Exception as e:
+            if page == 1:
+                return {"error": "Error", "msg": str(e)}
+            continue
+            
+    return {"rank": ">50", "url": "N/A", "features": feature_str}
 
 def render_styling():
     st.markdown("""
@@ -216,16 +231,16 @@ def main():
                         st.error(f"{res['error']}: {res['msg']}")
                         break
                         
-                    rank = res.get("rank", ">100")
+                    rank = res.get("rank", ">50")
                     url = res.get("url", "N/A")
                     
-                    if rank != ">100":
+                    if rank != ">50":
                         display_rank = str(rank)
                         position = rank
                         page_type = determine_page_type(url)
                     else:
-                        display_rank = ">100"
-                        position = 101
+                        display_rank = ">50"
+                        position = 51
                         page_type = "N/A"
                     
                     st.session_state.results_data.append({
@@ -254,13 +269,13 @@ def main():
             display_positions = []
             for p in df_res["Position"]:
                 all_positions.append(p)
-                if p <= 100:
+                if p <= 50:
                     display_positions.append(p)
             
             total_kw = len(df_res)
             top_3 = len([p for p in all_positions if p <= 3])
             top_10 = len([p for p in all_positions if p <= 10])
-            top_100 = len([p for p in all_positions if p <= 100])
+            top_50 = len([p for p in all_positions if p <= 50])
             
             avg_pos = sum(display_positions) / len(display_positions) if display_positions else "N/A"
             visibility = round((top_10 / total_kw * 100) if total_kw > 0 else 0, 1)
@@ -289,13 +304,12 @@ def main():
                     "Pos 4-10": top_10 - top_3,
                     "Pos 11-20": len([p for p in all_positions if 10 < p <= 20]),
                     "Pos 21-50": len([p for p in all_positions if 20 < p <= 50]),
-                    "Pos 51-100": len([p for p in all_positions if 50 < p <= 100]),
-                    "Not Ranked (>100)": total_kw - len([p for p in df_res["Position"] if p <= 100])
+                    "Not Ranked (>50)": total_kw - len([p for p in df_res["Position"] if p <= 50])
                 }
                 
                 dist_df = pd.DataFrame(list(dist.items()), columns=["Position Range", "Count"])
                 fig = px.bar(dist_df, x="Position Range", y="Count", color="Position Range", 
-                             color_discrete_sequence=['#10b981', '#34d399', '#fbbf24', '#f59e0b', '#ef4444', '#4b5563'],
+                             color_discrete_sequence=['#10b981', '#34d399', '#fbbf24', '#f59e0b', '#4b5563'],
                              template="plotly_dark")
                 fig.update_layout(showlegend=False, margin=dict(l=0, r=0, t=30, b=0), plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)")
                 st.plotly_chart(fig, use_container_width=True)
