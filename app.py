@@ -27,7 +27,7 @@ def determine_page_type(url):
     if url == "N/A":
         return "N/A"
     url_lower = url.lower()
-    if any(keyword in url_lower for keyword in ["/blog/", "/article/", "/post/", "/news/"]):
+    if any(keyword in url_lower for keyword in ["/blog", "/article", "/post", "/news", "blog/", "article/", "post/"]):
         return "Blog"
     return "Landing Page"
 
@@ -37,9 +37,10 @@ def get_search_results(keyword, target_domain, api_key, gl="us", hl="en", device
         'Content-Type': 'application/json'
     }
     
-    feature_str = "Standard"
+    global_rank = 0
+    actual_pos = 0
     
-    for page in range(1, 11): # Loop exactly 10 pages (top 100 results)
+    for page in range(1, 6): # Loop exactly 5 pages (top 50 results)
         payload = json.dumps({
             "q": keyword,
             "gl": gl,
@@ -63,41 +64,39 @@ def get_search_results(keyword, target_domain, api_key, gl="us", hl="en", device
             results = response.json()
             organic_results = results.get("organic", [])
             
-            if page == 1:
-                features = []
-                if "answerBox" in results:
-                    features.append("Featured Snippet")
-                if "places" in results:
-                    features.append("Local Pack")
-                if "topStories" in results:
-                    features.append("Top Stories")
-                feature_str = ", ".join(features) if features else "Standard"
-                
             if not organic_results:
                 break
-                
-            for idx, result in enumerate(organic_results):
+            
+            for result in organic_results:
+                global_rank += 1
                 link = result.get("link", "")
-                
-                # Get exact position from Serper or calculate it accurately based on page
-                current_rank = result.get("position")
-                if not current_rank:
-                    current_rank = (page - 1) * 10 + idx + 1
                 
                 # Strict subdomain and domain fuzzy matching requested by user
                 if target_domain.lower() in link.lower():
-                    return {"rank": current_rank, "url": link, "features": feature_str}
+                    # If position is explicitly provided by API and looks like a global rank, use it, else use counting rank
+                    serper_pos = result.get("position")
+                    if isinstance(serper_pos, int) and serper_pos >= global_rank:
+                        actual_pos = serper_pos
+                    else:
+                        actual_pos = global_rank
+                    
+                    # Double check we don't return a position greater than 50 if it's strictly top 50, but we return whatever it is if found in 5 pages
+                    return {"rank": actual_pos, "url": link}
                     
         except Exception as e:
             if page == 1:
                 return {"error": "Error", "msg": str(e)}
             continue
             
-    return {"rank": "Not in Top 100", "url": "N/A", "features": feature_str}
+    return {"rank": "Not in Top 50", "url": "N/A"}
 
 def render_styling():
     st.markdown("""
         <style>
+        .stApp {
+            background-color: #0E1117;
+            color: #FAFAFA;
+        }
         .stTabs [data-baseweb="tab-list"] {
             gap: 24px;
         }
@@ -111,30 +110,51 @@ def render_styling():
             font-size: 16px;
             font-weight: 600;
         }
+        .metric-container {
+            background-color: #161A25;
+            padding: 1.5rem;
+            border-radius: 12px;
+            border: 1px solid #2D333B;
+            margin-bottom: 1rem;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+        }
+        .metric-value {
+            font-size: 2.2rem;
+            font-weight: 800;
+            color: #FFFFFF;
+            margin-top: 0.5rem;
+        }
+        .metric-label {
+            font-size: 0.85rem;
+            color: #8B949E;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            font-weight: 600;
+        }
         </style>
     """, unsafe_allow_html=True)
 
 def color_coding(val):
     try:
         val_str = str(val)
-        if val_str == "Not in Top 100" or val_str.startswith(">"):
-            return 'background-color: rgba(239, 68, 68, 0.15); font-weight: bold;'
+        if "Not in" in val_str or val_str.startswith(">"):
+            return 'background-color: rgba(239, 68, 68, 0.1); color: #ef4444;'
         
         first_val = val_str.split(",")[0].replace("Pos", "").strip()
         val_int = int(first_val)
         
         if val_int <= 3:
-            return 'background-color: rgba(16, 185, 129, 0.2); font-weight: bold;'
+            return 'background-color: rgba(16, 185, 129, 0.15); color: #10b981; font-weight: bold;'
         elif val_int <= 10:
-            return 'background-color: rgba(16, 185, 129, 0.1); font-weight: 500;'
+            return 'background-color: rgba(52, 211, 153, 0.1); color: #34d399;'
         elif val_int <= 20: # Page 2
-            return 'background-color: rgba(245, 158, 11, 0.15); font-weight: 500;'
+            return 'background-color: rgba(245, 158, 11, 0.1); color: #f59e0b;'
         elif val_int <= 50:
-            return 'background-color: rgba(245, 158, 11, 0.1);'
+            return 'background-color: rgba(245, 158, 11, 0.1); color: #f59e0b;'
         else: # 50+
-            return 'background-color: rgba(239, 68, 68, 0.1);'
+            return 'background-color: rgba(239, 68, 68, 0.1); color: #ef4444;'
     except:
-        return 'background-color: transparent;'
+        return 'background-color: transparent; color: #8B949E;'
 
 def main():
     st.set_page_config(page_title="AI Keyword Tracker", page_icon="🎯", layout="wide", initial_sidebar_state="expanded")
@@ -205,16 +225,16 @@ def main():
                         st.error(f"{res['error']}: {res['msg']}")
                         break
                         
-                    rank = res.get("rank", "Not in Top 100")
+                    rank = res.get("rank", "Not in Top 50")
                     url = res.get("url", "N/A")
                     
-                    if rank != "Not in Top 100" and rank != ">100":
+                    if rank != "Not in Top 50":
                         display_rank = str(rank)
-                        position = rank
+                        position = int(rank) if str(rank).isdigit() else 51
                         page_type = determine_page_type(url)
                     else:
-                        display_rank = "Not in Top 100"
-                        position = 101
+                        display_rank = "Not in Top 50"
+                        position = 51
                         page_type = "N/A"
                     
                     st.session_state.results_data.append({
@@ -222,8 +242,7 @@ def main():
                         "Rank": display_rank,
                         "Position": position,
                         "URL": url,
-                        "Page Type": page_type,
-                        "Features": res.get("features", "Standard")
+                        "Page Type": page_type
                     })
                     progress_bar.progress((i + 1) / len(keywords))
                     time.sleep(0.1) 
@@ -244,27 +263,29 @@ def main():
             display_positions = []
             for p in df_res["Position"]:
                 all_positions.append(p)
-                if p <= 100:
+                if p <= 50:
                     display_positions.append(p)
             
             total_kw = len(df_res)
             top_3 = len([p for p in all_positions if p <= 3])
             top_10 = len([p for p in all_positions if p <= 10])
-            top_100 = len([p for p in all_positions if p <= 100])
+            top_50 = len([p for p in all_positions if p <= 50])
             
             avg_pos = sum(display_positions) / len(display_positions) if display_positions else "N/A"
             visibility = round((top_10 / total_kw * 100) if total_kw > 0 else 0, 1)
 
             col1, col2, col3, col4 = st.columns(4)
             with col1:
-                st.metric("Visibility Index", f"{visibility}%")
+                st.markdown(f'<div class="metric-container"><div class="metric-label">Visibility Index</div><div class="metric-value">{visibility}%</div></div>', unsafe_allow_html=True)
             with col2:
-                st.metric("Top 3 Rankings", top_3)
+                st.markdown(f'<div class="metric-container"><div class="metric-label">Top 3 Rankings</div><div class="metric-value">{top_3}</div></div>', unsafe_allow_html=True)
             with col3:
-                st.metric("Top 10 Rankings", top_10)
+                st.markdown(f'<div class="metric-container"><div class="metric-label">Top 10 Rankings</div><div class="metric-value">{top_10}</div></div>', unsafe_allow_html=True)
             with col4:
                 avg_display = f"{avg_pos:.1f}" if avg_pos != "N/A" else "N/A"
-                st.metric("Avg Position", avg_display, delta="1.2" if avg_pos != "N/A" else None)
+                # Mock delta for UI demonstration
+                delta_html = "<span style='color: #10b981; font-size: 1rem; margin-left: 8px;'>▲ 1.2</span>" if avg_pos != "N/A" else ""
+                st.markdown(f'<div class="metric-container"><div class="metric-label">Avg Position</div><div class="metric-value">{avg_display}{delta_html}</div></div>', unsafe_allow_html=True)
 
             st.subheader("Insights & Distribution")
             
@@ -277,26 +298,26 @@ def main():
                     "Pos 4-10": top_10 - top_3,
                     "Pos 11-20": len([p for p in all_positions if 10 < p <= 20]),
                     "Pos 21-50": len([p for p in all_positions if 20 < p <= 50]),
-                    "Pos 51-100": len([p for p in all_positions if 50 < p <= 100]),
-                    "Not Ranked (>100)": total_kw - len([p for p in df_res["Position"] if p <= 100])
+                    "Not Ranked (>50)": total_kw - len([p for p in df_res["Position"] if p <= 50])
                 }
                 
                 dist_df = pd.DataFrame(list(dist.items()), columns=["Position Range", "Count"])
                 fig = px.bar(dist_df, x="Position Range", y="Count", color="Position Range", 
-                             color_discrete_sequence=['#10b981', '#34d399', '#fbbf24', '#f59e0b', '#ef4444', '#4b5563'])
+                             color_discrete_sequence=['#10b981', '#34d399', '#fbbf24', '#f59e0b', '#4b5563'],
+                             template="plotly_dark")
                 fig.update_layout(showlegend=False, margin=dict(l=0, r=0, t=30, b=0), plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)")
-                st.plotly_chart(fig, use_container_width=True, theme="streamlit")
+                st.plotly_chart(fig, use_container_width=True)
                 
             with chart_col2:
                 st.markdown("##### Page Types")
                 page_types = df_res[df_res["Page Type"] != "N/A"]["Page Type"].value_counts().reset_index()
                 page_types.columns = ["Page Type", "Count"]
                 if not page_types.empty:
-                    fig_pie = px.pie(page_types, values="Count", names="Page Type", hole=0.7,
+                    fig_pie = px.pie(page_types, values="Count", names="Page Type", hole=0.7, template="plotly_dark",
                                      color_discrete_sequence=['#3b82f6', '#8b5cf6'])
                     fig_pie.update_layout(showlegend=True, margin=dict(l=0, r=0, t=30, b=0), plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
                                           legend=dict(orientation="h", yanchor="bottom", y=-0.2, xanchor="center", x=0.5))
-                    st.plotly_chart(fig_pie, use_container_width=True, theme="streamlit")
+                    st.plotly_chart(fig_pie, use_container_width=True)
                 else:
                     st.info("No ranked pages to analyze page types.")
 
@@ -308,7 +329,7 @@ def main():
             df_res_display = pd.DataFrame(st.session_state.results_data)
             
             # Hide internal data columns from UI
-            cols_to_drop = ['Position', 'SERP Features']
+            cols_to_drop = ['Position']
             df_res_display = df_res_display.drop(columns=cols_to_drop, errors='ignore')
             
             styled_df = df_res_display.style.map(color_coding, subset=['Rank'])
