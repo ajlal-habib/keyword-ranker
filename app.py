@@ -37,45 +37,63 @@ def get_search_results(keyword, target_domain, api_key, gl="us", hl="en", device
         'Content-Type': 'application/json'
     }
     
-    payload = json.dumps({
-        "q": keyword,
-        "gl": gl,
-        "hl": hl,
-        "num": 100,
-        "autocorrect": False,
-        "device": device
-    })
+    feature_str = "Standard"
     
-    try:
-        response = requests.post("https://google.serper.dev/search", headers=headers, data=payload)
+    for page in range(1, 11): # Loop exactly 10 pages (top 100 results)
+        payload = json.dumps({
+            "q": keyword,
+            "gl": gl,
+            "hl": hl,
+            "page": page,
+            "num": 10,
+            "autocorrect": False,
+            "device": device
+        })
         
-        if response.status_code == 403:
-            return {"error": "API Key Error", "msg": "Unauthorized: Please check your Serper.dev API key."}
-        elif response.status_code in [402, 429]:
-            return {"error": "Quota Exceeded", "msg": "Serper account out of credits or rate limit reached."}
-        elif response.status_code != 200:
-            return {"error": "API Error", "msg": f"Failed with status code {response.status_code}"}
+        try:
+            response = requests.post("https://google.serper.dev/search", headers=headers, data=payload)
             
-        results = response.json()
-        organic_results = results.get("organic", [])
-        
-        target_root = get_root_domain(target_domain)
-        
-        for idx, result in enumerate(organic_results):
-            link = result.get("link", "")
-            if not link:
+            if response.status_code == 403:
+                return {"error": "API Key Error", "msg": "Unauthorized: Please check your Serper.dev API key."}
+            elif response.status_code in [402, 429]:
+                return {"error": "Quota Exceeded", "msg": "Serper account out of credits or rate limit reached."}
+            elif response.status_code != 200:
                 continue
                 
-            link_root = get_root_domain(link)
+            results = response.json()
+            organic_results = results.get("organic", [])
             
-            if target_root == link_root or link_root.endswith('.' + target_root):
-                current_rank = result.get("position", idx + 1)
-                return {"rank": current_rank, "url": link}
+            if page == 1:
+                features = []
+                if "answerBox" in results:
+                    features.append("Featured Snippet")
+                if "places" in results:
+                    features.append("Local Pack")
+                if "topStories" in results:
+                    features.append("Top Stories")
+                feature_str = ", ".join(features) if features else "Standard"
                 
-    except Exception as e:
-        return {"error": "Error", "msg": str(e)}
-        
-    return {"rank": "Not in Top 100", "url": "N/A"}
+            if not organic_results:
+                break
+                
+            for idx, result in enumerate(organic_results):
+                link = result.get("link", "")
+                
+                # Get exact position from Serper or calculate it accurately based on page
+                current_rank = result.get("position")
+                if not current_rank:
+                    current_rank = (page - 1) * 10 + idx + 1
+                
+                # Strict subdomain and domain fuzzy matching requested by user
+                if target_domain.lower() in link.lower():
+                    return {"rank": current_rank, "url": link, "features": feature_str}
+                    
+        except Exception as e:
+            if page == 1:
+                return {"error": "Error", "msg": str(e)}
+            continue
+            
+    return {"rank": "Not in Top 100", "url": "N/A", "features": feature_str}
 
 def render_styling():
     st.markdown("""
@@ -229,7 +247,8 @@ def main():
                         "Rank": display_rank,
                         "Position": position,
                         "URL": url,
-                        "Page Type": page_type
+                        "Page Type": page_type,
+                        "Features": res.get("features", "Standard")
                     })
                     progress_bar.progress((i + 1) / len(keywords))
                     time.sleep(0.1) 
