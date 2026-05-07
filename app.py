@@ -93,10 +93,6 @@ def get_search_results(keyword, target_domain, api_key, gl="us", hl="en", device
 def render_styling():
     st.markdown("""
         <style>
-        .stApp {
-            background-color: #0E1117;
-            color: #FAFAFA;
-        }
         .stTabs [data-baseweb="tab-list"] {
             gap: 24px;
         }
