@@ -27,8 +27,7 @@ def determine_page_type(url):
     if url == "N/A":
         return "N/A"
     url_lower = url.lower()
-    keyword_list = ["/blog", "/article", "/post", "/news", "blog", "article", "post", "news"]
-    if any(keyword in url_lower for keyword in keyword_list):
+    if any(keyword in url_lower for keyword in ["/blog", "/article", "/post", "/news", "blog/", "article/", "post/"]):
         return "Blog"
     return "Landing Page"
 
@@ -38,45 +37,57 @@ def get_search_results(keyword, target_domain, api_key, gl="us", hl="en", device
         'Content-Type': 'application/json'
     }
     
-    # Use a single call with num=100 for maximum accuracy mimicking Google SERP depth
-    payload = json.dumps({
-        "q": keyword,
-        "gl": gl,
-        "hl": hl,
-        "num": 100,
-        "autocorrect": False,
-        "device": device
-    })
+    global_rank = 0
+    actual_pos = 0
     
-    try:
-        response = requests.post("https://google.serper.dev/search", headers=headers, data=payload)
+    for page in range(1, 6): # Loop exactly 5 pages (top 50 results)
+        payload = json.dumps({
+            "q": keyword,
+            "gl": gl,
+            "hl": hl,
+            "page": page,
+            "num": 10,
+            "autocorrect": False,
+            "device": device
+        })
         
-        if response.status_code == 403:
-            return {"error": "API Key Error", "msg": "Unauthorized: Please check your Serper.dev API key."}
-        elif response.status_code in [402, 429]:
-            return {"error": "Quota Exceeded", "msg": "Serper account out of credits or rate limit reached."}
-        elif response.status_code != 200:
-            return {"rank": "Not in Top 50", "url": "N/A"}
+        try:
+            response = requests.post("https://google.serper.dev/search", headers=headers, data=payload)
             
-        results = response.json()
-        organic_results = results.get("organic", [])
-        
-        for result in organic_results:
-            link = result.get("link", "")
-            
-            # Strict subdomain and domain fuzzy matching requested by user
-            if target_domain.lower() in link.lower():
-                actual_rank = result.get("position", 101)
+            if response.status_code == 403:
+                return {"error": "API Key Error", "msg": "Unauthorized: Please check your Serper.dev API key."}
+            elif response.status_code in [402, 429]:
+                return {"error": "Quota Exceeded", "msg": "Serper account out of credits or rate limit reached."}
+            elif response.status_code != 200:
+                continue
                 
-                # Check if it actually represents a ranking within Top 50
-                if isinstance(actual_rank, int) and actual_rank <= 50:
-                    return {"rank": actual_rank, "url": link}
-                elif isinstance(actual_rank, int) and actual_rank > 50:
-                    return {"rank": "Not in Top 50", "url": "N/A"}
+            results = response.json()
+            organic_results = results.get("organic", [])
+            
+            if not organic_results:
+                break
+            
+            for result in organic_results:
+                global_rank += 1
+                link = result.get("link", "")
+                
+                # Strict subdomain and domain fuzzy matching requested by user
+                if target_domain.lower() in link.lower():
+                    # If position is explicitly provided by API and looks like a global rank, use it, else use counting rank
+                    serper_pos = result.get("position")
+                    if isinstance(serper_pos, int) and serper_pos >= global_rank:
+                        actual_pos = serper_pos
+                    else:
+                        actual_pos = global_rank
                     
-    except Exception as e:
-        return {"error": "Error", "msg": str(e)}
-        
+                    # Double check we don't return a position greater than 50 if it's strictly top 50, but we return whatever it is if found in 5 pages
+                    return {"rank": actual_pos, "url": link}
+                    
+        except Exception as e:
+            if page == 1:
+                return {"error": "Error", "msg": str(e)}
+            continue
+            
     return {"rank": "Not in Top 50", "url": "N/A"}
 
 def render_styling():
@@ -314,7 +325,7 @@ def main():
             df_res_display = pd.DataFrame(st.session_state.results_data)
             
             # Hide internal data columns from UI
-            cols_to_drop = ['Position', 'Features']
+            cols_to_drop = ['Position']
             df_res_display = df_res_display.drop(columns=cols_to_drop, errors='ignore')
             
             styled_df = df_res_display.style.map(color_coding, subset=['Rank'])
