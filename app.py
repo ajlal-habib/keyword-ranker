@@ -37,63 +37,45 @@ def get_search_results(keyword, target_domain, api_key, gl="us", hl="en", device
         'Content-Type': 'application/json'
     }
     
-    feature_str = "Standard"
+    payload = json.dumps({
+        "q": keyword,
+        "gl": gl,
+        "hl": hl,
+        "num": 100,
+        "autocorrect": False,
+        "device": device
+    })
     
-    for page in range(1, 11): # Loop exactly 10 pages (top 100 results)
-        payload = json.dumps({
-            "q": keyword,
-            "gl": gl,
-            "hl": hl,
-            "page": page,
-            "num": 10,
-            "autocorrect": False,
-            "device": device
-        })
+    try:
+        response = requests.post("https://google.serper.dev/search", headers=headers, data=payload)
         
-        try:
-            response = requests.post("https://google.serper.dev/search", headers=headers, data=payload)
+        if response.status_code == 403:
+            return {"error": "API Key Error", "msg": "Unauthorized: Please check your Serper.dev API key."}
+        elif response.status_code in [402, 429]:
+            return {"error": "Quota Exceeded", "msg": "Serper account out of credits or rate limit reached."}
+        elif response.status_code != 200:
+            return {"error": "API Error", "msg": f"Failed with status code {response.status_code}"}
             
-            if response.status_code == 403:
-                return {"error": "API Key Error", "msg": "Unauthorized: Please check your Serper.dev API key."}
-            elif response.status_code in [402, 429]:
-                return {"error": "Quota Exceeded", "msg": "Serper account out of credits or rate limit reached."}
-            elif response.status_code != 200:
+        results = response.json()
+        organic_results = results.get("organic", [])
+        
+        target_root = get_root_domain(target_domain)
+        
+        for idx, result in enumerate(organic_results):
+            link = result.get("link", "")
+            if not link:
                 continue
                 
-            results = response.json()
-            organic_results = results.get("organic", [])
+            link_root = get_root_domain(link)
             
-            if page == 1:
-                features = []
-                if "answerBox" in results:
-                    features.append("Featured Snippet")
-                if "places" in results:
-                    features.append("Local Pack")
-                if "topStories" in results:
-                    features.append("Top Stories")
-                feature_str = ", ".join(features) if features else "Standard"
+            if target_root == link_root or link_root.endswith('.' + target_root):
+                current_rank = result.get("position", idx + 1)
+                return {"rank": current_rank, "url": link}
                 
-            if not organic_results:
-                break
-                
-            for idx, result in enumerate(organic_results):
-                link = result.get("link", "")
-                
-                # Get exact position from Serper or calculate it accurately based on page
-                current_rank = result.get("position")
-                if not current_rank:
-                    current_rank = (page - 1) * 10 + idx + 1
-                
-                # Strict subdomain and domain fuzzy matching requested by user
-                if target_domain.lower() in link.lower():
-                    return {"rank": current_rank, "url": link, "features": feature_str}
-                    
-        except Exception as e:
-            if page == 1:
-                return {"error": "Error", "msg": str(e)}
-            continue
-            
-    return {"rank": ">100", "url": "N/A", "features": feature_str}
+    except Exception as e:
+        return {"error": "Error", "msg": str(e)}
+        
+    return {"rank": "Not in Top 100", "url": "N/A"}
 
 def render_styling():
     st.markdown("""
@@ -142,7 +124,7 @@ def render_styling():
 def color_coding(val):
     try:
         val_str = str(val)
-        if val_str.startswith(">"):
+        if val_str == "Not in Top 100" or val_str.startswith(">"):
             return 'background-color: rgba(239, 68, 68, 0.1); color: #ef4444;'
         
         first_val = val_str.split(",")[0].replace("Pos", "").strip()
@@ -230,15 +212,15 @@ def main():
                         st.error(f"{res['error']}: {res['msg']}")
                         break
                         
-                    rank = res.get("rank", ">100")
+                    rank = res.get("rank", "Not in Top 100")
                     url = res.get("url", "N/A")
                     
-                    if rank != ">100":
+                    if rank != "Not in Top 100" and rank != ">100":
                         display_rank = str(rank)
                         position = rank
                         page_type = determine_page_type(url)
                     else:
-                        display_rank = ">100"
+                        display_rank = "Not in Top 100"
                         position = 101
                         page_type = "N/A"
                     
