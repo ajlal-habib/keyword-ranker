@@ -38,18 +38,15 @@ def get_search_results(keyword, target_domain, api_key, gl="us", hl="en", device
     }
     
     feature_str = "Standard"
-    best_rank = 101
-    best_url = "N/A"
+    global_rank = 0
     
-    total_results_count = "Unknown"
-    
-    for page in [1, 2]:
+    for page in range(1, 6): # Loop exactly 5 pages (top 50 results)
         payload = json.dumps({
             "q": keyword,
             "gl": gl,
             "hl": hl,
             "page": page,
-            "num": 25,
+            "num": 10,
             "autocorrect": False,
             "device": device
         })
@@ -65,9 +62,9 @@ def get_search_results(keyword, target_domain, api_key, gl="us", hl="en", device
                 continue
                 
             results = response.json()
+            organic_results = results.get("organic", [])
             
             if page == 1:
-                total_results_count = results.get("searchInformation", {}).get("totalResults", "Unknown")
                 features = []
                 if "answerBox" in results:
                     features.append("Featured Snippet")
@@ -77,40 +74,22 @@ def get_search_results(keyword, target_domain, api_key, gl="us", hl="en", device
                     features.append("Top Stories")
                 feature_str = ", ".join(features) if features else "Standard"
                 
-            blocks_to_check = [
-                results.get("organic", []),
-                results.get("peopleAlsoAsk", []),
-                results.get("places", []),
-                results.get("localResults", [])
-            ]
-            
-            kg = results.get("knowledgeGraph", {})
-            if kg and isinstance(kg, dict):
-                blocks_to_check.append([kg])
+            if not organic_results:
+                break
                 
-            for block in blocks_to_check:
-                for item in block:
-                    link = item.get("link") or item.get("website") or ""
+            for result in organic_results:
+                global_rank += 1
+                link = result.get("link", "")
+                
+                # Strict subdomain and domain fuzzy matching requested by user
+                if target_domain.lower() in link.lower():
+                    return {"rank": global_rank, "url": link, "features": feature_str}
                     
-                    if link and target_domain.lower() in link.lower():
-                        rank = item.get("position")
-                        
-                        if rank is None:
-                            rank = 1 if page == 1 else 26
-                            
-                        if rank < best_rank:
-                            best_rank = rank
-                            best_url = link
-                            
         except Exception as e:
             if page == 1:
                 return {"error": "Error", "msg": str(e)}
             continue
             
-    if best_rank <= 50:
-        return {"rank": best_rank, "url": best_url, "features": feature_str}
-        
-    print(f"DEBUG: Keyword '{keyword}' returned N/A. API saw Total Results: {total_results_count}")
     return {"rank": ">50", "url": "N/A", "features": feature_str}
 
 def render_styling():
