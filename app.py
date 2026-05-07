@@ -198,12 +198,9 @@ def main():
                 except Exception as e:
                     st.error(f"Error reading CSV: {e}")
         else:
-            pasted_text = st.text_area("Paste keywords (one per line)", height=150, label_visibility="collapsed", placeholder="keyword 1
-keyword 2
-keyword 3")
+            pasted_text = st.text_area("Paste keywords (one per line)", height=150, label_visibility="collapsed", placeholder="keyword 1\nkeyword 2\nkeyword 3")
             if pasted_text:
-                keywords = [k.strip() for k in pasted_text.split('
-') if k.strip()]
+                keywords = [k.strip() for k in pasted_text.split('\n') if k.strip()]
                 if keywords:
                     st.success(f"✓ Loaded {len(keywords)} keywords")
 
@@ -244,8 +241,7 @@ keyword 3")
                         positions = [m['position'] for m in matches]
                         url = matches[0]["url"]
                         page_type = determine_page_type(url)
-                        all_rankings = "
-".join([f"Pos {m['position']}: {m['url']}" for m in matches])
+                        all_rankings = "\n".join([f"Pos {m['position']}: {m['url']}" for m in matches])
                         
                         if len(matches) > 1:
                             display_rank = ", ".join([f"Pos {p}" for p in positions])
