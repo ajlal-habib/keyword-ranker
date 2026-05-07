@@ -39,8 +39,6 @@ def get_search_results(keyword, target_domain, api_key, gl="us", hl="en"):
     
     feature_str = "Standard"
     global_rank = 0
-    matches = []
-    seen_urls = set()
     
     for page in range(1, 11): # Loop precisely 10 pages (top 100 results)
         payload = json.dumps({
@@ -82,19 +80,14 @@ def get_search_results(keyword, target_domain, api_key, gl="us", hl="en"):
                 
                 # Strict subdomain and domain fuzzy matching requested by user
                 if target_domain.lower() in link.lower():
-                    if link.lower() not in seen_urls:
-                        matches.append({
-                            "position": global_rank,
-                            "url": link
-                        })
-                        seen_urls.add(link.lower())
+                    return {"rank": global_rank, "url": link, "features": feature_str}
                     
         except Exception as e:
             if page == 1:
                 return {"error": "Error", "msg": str(e)}
             continue
             
-    return {"matches": matches, "features": feature_str}
+    return {"rank": ">100", "url": "N/A", "features": feature_str}
 
 def render_styling():
     st.markdown("""
@@ -230,32 +223,24 @@ def main():
                         st.error(f"{res['error']}: {res['msg']}")
                         break
                         
-                    matches = res.get("matches", [])
-                    if not matches:
-                        display_rank = ">100"
-                        url = "N/A"
-                        page_type = "N/A"
-                        all_rankings = "N/A"
-                        positions = [101]
-                    else:
-                        positions = [m['position'] for m in matches]
-                        url = matches[0]["url"]
+                    rank = res.get("rank", ">100")
+                    url = res.get("url", "N/A")
+                    
+                    if rank != ">100":
+                        display_rank = str(rank)
+                        position = rank
                         page_type = determine_page_type(url)
-                        all_rankings = "\n".join([f"Pos {m['position']}: {m['url']}" for m in matches])
-                        
-                        if len(matches) > 1:
-                            display_rank = ", ".join([f"Pos {p}" for p in positions])
-                        else:
-                            display_rank = str(positions[0])
+                    else:
+                        display_rank = ">100"
+                        position = 101
+                        page_type = "N/A"
                     
                     st.session_state.results_data.append({
                         "Keyword": kv,
                         "Rank": display_rank,
-                        "Positions": positions,
+                        "Position": position,
                         "URL": url,
-                        "Page Type": page_type,
-                        "All Rankings": all_rankings,
-                        "Match Count": len(matches)
+                        "Page Type": page_type
                     })
                     progress_bar.progress((i + 1) / len(keywords))
                     time.sleep(0.1) 
@@ -274,11 +259,10 @@ def main():
             
             all_positions = []
             display_positions = []
-            for pos_list in df_res["Positions"]:
-                for p in pos_list:
-                    all_positions.append(p)
-                    if p <= 100:
-                        display_positions.append(p)
+            for p in df_res["Position"]:
+                all_positions.append(p)
+                if p <= 100:
+                    display_positions.append(p)
             
             total_kw = len(df_res)
             top_3 = len([p for p in all_positions if p <= 3])
@@ -313,7 +297,7 @@ def main():
                     "Pos 11-20": len([p for p in all_positions if 10 < p <= 20]),
                     "Pos 21-50": len([p for p in all_positions if 20 < p <= 50]),
                     "Pos 51-100": len([p for p in all_positions if 50 < p <= 100]),
-                    "Not Ranked (>100)": total_kw - len([pos_list for pos_list in df_res["Positions"] if min(pos_list) <= 100])
+                    "Not Ranked (>100)": total_kw - len([p for p in df_res["Position"] if p <= 100])
                 }
                 
                 dist_df = pd.DataFrame(list(dist.items()), columns=["Position Range", "Count"])
@@ -344,7 +328,7 @@ def main():
             df_res_display = pd.DataFrame(st.session_state.results_data)
             
             # Hide internal data columns from UI
-            cols_to_drop = ['Positions', 'Match Count', 'SERP Features']
+            cols_to_drop = ['Position', 'SERP Features']
             df_res_display = df_res_display.drop(columns=cols_to_drop, errors='ignore')
             
             styled_df = df_res_display.style.map(color_coding, subset=['Rank'])
