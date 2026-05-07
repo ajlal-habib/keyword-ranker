@@ -38,9 +38,8 @@ def get_search_results(keyword, target_domain, api_key, gl="us", hl="en", device
     }
     
     feature_str = "Standard"
-    global_rank = 0
     
-    for page in range(1, 6): # Loop exactly 5 pages (top 50 results)
+    for page in range(1, 11): # Loop exactly 10 pages (top 100 results)
         payload = json.dumps({
             "q": keyword,
             "gl": gl,
@@ -77,20 +76,24 @@ def get_search_results(keyword, target_domain, api_key, gl="us", hl="en", device
             if not organic_results:
                 break
                 
-            for result in organic_results:
-                global_rank += 1
+            for idx, result in enumerate(organic_results):
                 link = result.get("link", "")
+                
+                # Get exact position from Serper or calculate it accurately based on page
+                current_rank = result.get("position")
+                if not current_rank:
+                    current_rank = (page - 1) * 10 + idx + 1
                 
                 # Strict subdomain and domain fuzzy matching requested by user
                 if target_domain.lower() in link.lower():
-                    return {"rank": global_rank, "url": link, "features": feature_str}
+                    return {"rank": current_rank, "url": link, "features": feature_str}
                     
         except Exception as e:
             if page == 1:
                 return {"error": "Error", "msg": str(e)}
             continue
             
-    return {"rank": ">50", "url": "N/A", "features": feature_str}
+    return {"rank": "Not in Top 100", "url": "N/A", "features": feature_str}
 
 def render_styling():
     st.markdown("""
@@ -139,7 +142,7 @@ def render_styling():
 def color_coding(val):
     try:
         val_str = str(val)
-        if val_str.startswith(">"):
+        if val_str == "Not in Top 100" or val_str.startswith(">"):
             return 'background-color: rgba(239, 68, 68, 0.1); color: #ef4444;'
         
         first_val = val_str.split(",")[0].replace("Pos", "").strip()
@@ -227,16 +230,16 @@ def main():
                         st.error(f"{res['error']}: {res['msg']}")
                         break
                         
-                    rank = res.get("rank", ">50")
+                    rank = res.get("rank", "Not in Top 100")
                     url = res.get("url", "N/A")
                     
-                    if rank != ">50":
+                    if rank != "Not in Top 100" and rank != ">100":
                         display_rank = str(rank)
                         position = rank
                         page_type = determine_page_type(url)
                     else:
-                        display_rank = ">50"
-                        position = 51
+                        display_rank = "Not in Top 100"
+                        position = 101
                         page_type = "N/A"
                     
                     st.session_state.results_data.append({
@@ -244,7 +247,8 @@ def main():
                         "Rank": display_rank,
                         "Position": position,
                         "URL": url,
-                        "Page Type": page_type
+                        "Page Type": page_type,
+                        "Features": res.get("features", "Standard")
                     })
                     progress_bar.progress((i + 1) / len(keywords))
                     time.sleep(0.1) 
@@ -265,13 +269,13 @@ def main():
             display_positions = []
             for p in df_res["Position"]:
                 all_positions.append(p)
-                if p <= 50:
+                if p <= 100:
                     display_positions.append(p)
             
             total_kw = len(df_res)
             top_3 = len([p for p in all_positions if p <= 3])
             top_10 = len([p for p in all_positions if p <= 10])
-            top_50 = len([p for p in all_positions if p <= 50])
+            top_100 = len([p for p in all_positions if p <= 100])
             
             avg_pos = sum(display_positions) / len(display_positions) if display_positions else "N/A"
             visibility = round((top_10 / total_kw * 100) if total_kw > 0 else 0, 1)
@@ -300,12 +304,13 @@ def main():
                     "Pos 4-10": top_10 - top_3,
                     "Pos 11-20": len([p for p in all_positions if 10 < p <= 20]),
                     "Pos 21-50": len([p for p in all_positions if 20 < p <= 50]),
-                    "Not Ranked (>50)": total_kw - len([p for p in df_res["Position"] if p <= 50])
+                    "Pos 51-100": len([p for p in all_positions if 50 < p <= 100]),
+                    "Not Ranked (>100)": total_kw - len([p for p in df_res["Position"] if p <= 100])
                 }
                 
                 dist_df = pd.DataFrame(list(dist.items()), columns=["Position Range", "Count"])
                 fig = px.bar(dist_df, x="Position Range", y="Count", color="Position Range", 
-                             color_discrete_sequence=['#10b981', '#34d399', '#fbbf24', '#f59e0b', '#4b5563'],
+                             color_discrete_sequence=['#10b981', '#34d399', '#fbbf24', '#f59e0b', '#ef4444', '#4b5563'],
                              template="plotly_dark")
                 fig.update_layout(showlegend=False, margin=dict(l=0, r=0, t=30, b=0), plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)")
                 st.plotly_chart(fig, use_container_width=True)
