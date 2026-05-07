@@ -38,54 +38,47 @@ def get_search_results(keyword, target_domain, api_key, gl="us", hl="en"):
     }
     
     feature_str = "Standard"
-    global_rank = 0
     
-    for page in range(1, 11): # Loop precisely 10 pages (top 100 results)
-        payload = json.dumps({
-            "q": keyword,
-            "gl": gl,
-            "hl": hl,
-            "page": page
-        })
+    payload = json.dumps({
+        "q": keyword,
+        "gl": gl,
+        "hl": hl,
+        "num": 100
+    })
+    
+    try:
+        response = requests.post("https://google.serper.dev/search", headers=headers, data=payload)
         
-        try:
-            response = requests.post("https://google.serper.dev/search", headers=headers, data=payload)
+        if response.status_code == 403:
+            return {"error": "API Key Error", "msg": "Unauthorized: Please check your Serper.dev API key."}
+        elif response.status_code in [402, 429]:
+            return {"error": "Quota Exceeded", "msg": "Serper account out of credits or rate limit reached."}
+        elif response.status_code != 200:
+            return {"error": "API Error", "msg": f"Failed with status code {response.status_code}"}
             
-            if response.status_code == 403:
-                return {"error": "API Key Error", "msg": "Unauthorized: Please check your Serper.dev API key."}
-            elif response.status_code in [402, 429]:
-                return {"error": "Quota Exceeded", "msg": "Serper account out of credits or rate limit reached."}
-            elif response.status_code != 200:
-                continue
-                
-            results = response.json()
-            organic_results = results.get("organic", [])
+        results = response.json()
+        organic_results = results.get("organic", [])
+        
+        features = []
+        if "answerBox" in results:
+            features.append("Featured Snippet")
+        if "places" in results:
+            features.append("Local Pack")
+        if "topStories" in results:
+            features.append("Top Stories")
+        feature_str = ", ".join(features) if features else "Standard"
             
-            if page == 1:
-                features = []
-                if "answerBox" in results:
-                    features.append("Featured Snippet")
-                if "places" in results:
-                    features.append("Local Pack")
-                if "topStories" in results:
-                    features.append("Top Stories")
-                feature_str = ", ".join(features) if features else "Standard"
+        for result in organic_results:
+            link = result.get("link", "")
+            # Serper usually provides the position attribute, or we can use the index
+            global_rank = result.get("position", organic_results.index(result) + 1)
+            
+            # Strict subdomain and domain fuzzy matching requested by user
+            if target_domain.lower() in link.lower():
+                return {"rank": global_rank, "url": link, "features": feature_str}
                 
-            if not organic_results:
-                break
-                
-            for result in organic_results:
-                global_rank += 1
-                link = result.get("link", "")
-                
-                # Strict subdomain and domain fuzzy matching requested by user
-                if target_domain.lower() in link.lower():
-                    return {"rank": global_rank, "url": link, "features": feature_str}
-                    
-        except Exception as e:
-            if page == 1:
-                return {"error": "Error", "msg": str(e)}
-            continue
+    except Exception as e:
+        return {"error": "Error", "msg": str(e)}
             
     return {"rank": ">100", "url": "N/A", "features": feature_str}
 
