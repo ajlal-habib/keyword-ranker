@@ -40,6 +40,7 @@ def get_search_results(keyword, target_domain, api_key, gl="us", hl="en"):
     feature_str = "Standard"
     global_rank = 0
     matches = []
+    seen_urls = set()
     
     for page in range(1, 11): # Loop precisely 10 pages (top 100 results)
         payload = json.dumps({
@@ -81,10 +82,12 @@ def get_search_results(keyword, target_domain, api_key, gl="us", hl="en"):
                 
                 # Strict subdomain and domain fuzzy matching requested by user
                 if target_domain.lower() in link.lower():
-                    matches.append({
-                        "position": global_rank,
-                        "url": link
-                    })
+                    if link.lower() not in seen_urls:
+                        matches.append({
+                            "position": global_rank,
+                            "url": link
+                        })
+                        seen_urls.add(link.lower())
                     
         except Exception as e:
             if page == 1:
@@ -195,9 +198,12 @@ def main():
                 except Exception as e:
                     st.error(f"Error reading CSV: {e}")
         else:
-            pasted_text = st.text_area("Paste keywords (one per line)", height=150, label_visibility="collapsed", placeholder="keyword 1\nkeyword 2\nkeyword 3")
+            pasted_text = st.text_area("Paste keywords (one per line)", height=150, label_visibility="collapsed", placeholder="keyword 1
+keyword 2
+keyword 3")
             if pasted_text:
-                keywords = [k.strip() for k in pasted_text.split('\n') if k.strip()]
+                keywords = [k.strip() for k in pasted_text.split('
+') if k.strip()]
                 if keywords:
                     st.success(f"✓ Loaded {len(keywords)} keywords")
 
@@ -238,7 +244,8 @@ def main():
                         positions = [m['position'] for m in matches]
                         url = matches[0]["url"]
                         page_type = determine_page_type(url)
-                        all_rankings = "\n".join([f"Pos {m['position']}: {m['url']}" for m in matches])
+                        all_rankings = "
+".join([f"Pos {m['position']}: {m['url']}" for m in matches])
                         
                         if len(matches) > 1:
                             display_rank = ", ".join([f"Pos {p}" for p in positions])
