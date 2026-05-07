@@ -7,8 +7,16 @@ import plotly.express as px
 import tldextract
 from urllib.parse import urlparse
 
+# --- INITIALIZATION ---
+def init_session_state():
+    if "results_data" not in st.session_state:
+        st.session_state.results_data = []
+    if "domain" not in st.session_state:
+        st.session_state.domain = ""
+
 # --- CORE SEO LOGIC ---
 def get_clean_root(url_or_domain):
+    """Accurately extracts the root domain (e.g., folio3.com)."""
     ext = tldextract.extract(url_or_domain)
     return f"{ext.domain}.{ext.suffix}".lower()
 
@@ -19,57 +27,13 @@ def determine_page_type(url):
         return "Blog"
     return "Landing Page"
 
-# --- STYLING (Fixed for Dark/Light Mode) ---
-def render_styling():
-    st.markdown("""
-        <style>
-        /* Container that adapts to Streamlit's theme */
-        .metric-container {
-            background-color: var(--secondary-bg-color);
-            padding: 1.5rem;
-            border-radius: 12px;
-            border: 1px solid var(--border-color);
-            margin-bottom: 1rem;
-            transition: all 0.3s ease;
-        }
-        /* Text that adapts to theme primary text color */
-        .metric-value {
-            font-size: 2rem;
-            font-weight: 800;
-            color: var(--text-color);
-        }
-        .metric-label {
-            font-size: 0.8rem;
-            color: var(--text-color);
-            opacity: 0.7;
-            text-transform: uppercase;
-            font-weight: 600;
-        }
-        /* Simple fix for Tab readability */
-        .stTabs [data-baseweb="tab"] {
-            font-weight: 600;
-        }
-        </style>
-    """, unsafe_allow_html=True)
-
-def color_coding(val):
-    if val == "Not in Top 100" or val == ">50": 
-        return 'background-color: rgba(239, 68, 68, 0.1); color: #ef4444;'
-    try:
-        # Extract first number if multiple exist
-        v = int(str(val).split(',')[0].replace('Pos', '').strip())
-        if v <= 3: return 'background-color: rgba(16, 185, 129, 0.2); color: #10b981; font-weight: bold;'
-        if v <= 10: return 'background-color: rgba(52, 211, 153, 0.1); color: #34d399;'
-        return 'color: #f59e0b;' # Orange for page 2+
-    except: return ''
-
-# --- UPDATED SEARCH LOGIC (US Accuracy) ---
 def get_search_results(keyword, target_input, api_key, gl="us", hl="en", device="desktop"):
+    """Fetches real-time US rankings with strict domain validation."""
     target_root = get_clean_root(target_input)
     headers = {'X-API-KEY': api_key, 'Content-Type': 'application/json'}
     
     payload = json.dumps({
-        "q": keyword, "gl": gl, "hl": hl, "num": 100, 
+        "q": keyword, "gl": "us", "hl": "en", "num": 100, 
         "autocorrect": False, "device": device
     })
     
@@ -101,56 +65,114 @@ def get_search_results(keyword, target_input, api_key, gl="us", hl="en", device=
         }
     except: return {"error": "System Error"}
 
+# --- THEME-AWARE STYLING ---
+def render_styling():
+    st.markdown("""
+        <style>
+        .metric-container {
+            background-color: var(--secondary-bg-color);
+            padding: 1.5rem;
+            border-radius: 12px;
+            border: 1px solid var(--border-color);
+            margin-bottom: 1rem;
+        }
+        .metric-value {
+            font-size: 2.2rem;
+            font-weight: 800;
+            color: var(--text-color);
+        }
+        .metric-label {
+            font-size: 0.85rem;
+            color: var(--text-color);
+            opacity: 0.7;
+            text-transform: uppercase;
+            font-weight: 600;
+        }
+        </style>
+    """, unsafe_allow_html=True)
+
+def color_coding(val):
+    if val == "Not in Top 100" or val == ">50": 
+        return 'background-color: rgba(239, 68, 68, 0.15); color: #ef4444;'
+    try:
+        # Check first rank in a multi-rank string
+        v = int(str(val).split(',')[0].replace('Pos', '').strip())
+        if v <= 3: return 'background-color: rgba(16, 185, 129, 0.2); color: #10b981; font-weight: bold;'
+        if v <= 10: return 'background-color: rgba(52, 211, 153, 0.15); color: #34d399;'
+        return 'color: #f59e0b;' 
+    except: return ''
+
 # --- MAIN APP ---
 def main():
     st.set_page_config(page_title="AI Keyword Tracker", page_icon="🎯", layout="wide")
-    if "results_data" not in st.session_state: st.session_state.results_data = []
+    init_session_state()
     render_styling()
     
     st.title("🎯 AI Keyword Tracker")
 
     with st.sidebar:
         st.header("⚙️ Configuration")
-        target_domain = st.text_input("Target Domain", placeholder="e.g. folio3.com")
+        target_domain = st.text_input("Target Domain", value=st.session_state.domain, placeholder="e.g. folio3.com")
         serpapi_key = st.text_input("Serper.dev API Key", type="password")
-        country = st.selectbox("Country", ["us", "uk", "ca"], index=0)
         
-        text = st.text_area("Paste Keywords")
-        keywords = [k.strip() for k in text.split('\n') if k.strip()]
+        st.divider()
+        input_method = st.radio("Input Keywords", ["📄 CSV", "⌨️ Paste"])
+        keywords = []
+        
+        if input_method == "📄 CSV":
+            file = st.file_uploader("Upload CSV", type=["csv"])
+            if file:
+                df = pd.read_csv(file)
+                col = next((c for c in df.columns if 'keyword' in c.lower()), None)
+                if col: keywords = df[col].dropna().tolist()
+        else:
+            text = st.text_area("One keyword per line")
+            keywords = [k.strip() for k in text.split('\n') if k.strip()]
 
-        if st.button("🚀 Analyze SERP", type="primary"):
-            st.session_state.results_data = []
-            p_bar = st.progress(0)
-            for i, kw in enumerate(keywords):
-                res = get_search_results(kw, target_domain, serpapi_key, country)
-                st.session_state.results_data.append({
-                    "Keyword": kw, "Best Rank": res.get("rank"), 
-                    "URL": res.get("url"), "All Rankings": res.get("all_ranks")
-                })
-                p_bar.progress((i + 1) / len(keywords))
+        if st.button("🚀 Analyze SERP", type="primary", use_container_width=True):
+            if target_domain and serpapi_key and keywords:
+                st.session_state.domain = target_domain
+                st.session_state.results_data = []
+                p_bar = st.progress(0)
+                
+                for i, kw in enumerate(keywords):
+                    res = get_search_results(kw, target_domain, serpapi_key)
+                    st.session_state.results_data.append({
+                        "Keyword": kw,
+                        "Rank": res.get("rank"), # Uniform naming to fix KeyError
+                        "URL": res.get("url"),
+                        "Page Type": determine_page_type(res.get("url")),
+                        "All Listings": res.get("all_ranks")
+                    })
+                    p_bar.progress((i + 1) / len(keywords))
+                st.success("Complete!")
 
-    tab1, tab2 = st.tabs(["📊 Dashboard", "🔍 Intelligence"])
+    tab1, tab2, tab3 = st.tabs(["📊 Dashboard", "🔍 Keyword Intelligence", "📥 Export"])
 
     with tab1:
         if st.session_state.results_data:
             df = pd.DataFrame(st.session_state.results_data)
-            valid = [int(r) for r in df["Best Rank"] if str(r).isdigit()]
+            # Fix: Ensure logic matches "Rank" column
+            valid = [int(r) for r in df["Rank"] if str(r).isdigit()]
             
             c1, c2, c3 = st.columns(3)
-            # These now use var(--text-color) so they work in Light Mode
-            c1.markdown(f'<div class="metric-container"><div class="metric-label">Top 10</div><div class="metric-value">{len([r for r in valid if r <= 10])}</div></div>', unsafe_allow_html=True)
-            c2.markdown(f'<div class="metric-container"><div class="metric-label">Avg Rank</div><div class="metric-value">{(sum(valid)/len(valid)) if valid else 0 :.1f}</div></div>', unsafe_allow_html=True)
-            c3.markdown(f'<div class="metric-container"><div class="metric-label">Keywords</div><div class="metric-value">{len(df)}</div></div>', unsafe_allow_html=True)
+            with c1: st.markdown(f'<div class="metric-container"><div class="metric-label">Top 10</div><div class="metric-value">{len([r for r in valid if r <= 10])}</div></div>', unsafe_allow_html=True)
+            with c2: st.markdown(f'<div class="metric-container"><div class="metric-label">Avg Rank</div><div class="metric-value">{(sum(valid)/len(valid)) if valid else 0 :.1f}</div></div>', unsafe_allow_html=True)
+            with c3: st.markdown(f'<div class="metric-container"><div class="metric-label">Visibility</div><div class="metric-value">{len(valid)} / {len(df)}</div></div>', unsafe_allow_html=True)
             
-            # Use 'streamlit' theme for Plotly to automatically swap colors
-            fig = px.histogram(df, x="Best Rank", template="plotly_white" if st.get_option("theme.base") == "light" else "plotly_dark")
+            fig = px.histogram(df, x="Rank", template="none", title="Rank Distribution")
             st.plotly_chart(fig, use_container_width=True, theme="streamlit")
 
     with tab2:
         if st.session_state.results_data:
             df_display = pd.DataFrame(st.session_state.results_data)
-            # Use .map for newer pandas versions
-            st.dataframe(df_display.style.map(color_coding, subset=['Best Rank']), use_container_width=True)
+            # Use .map() for modern pandas versions
+            st.dataframe(df_display.style.map(color_coding, subset=['Rank']), use_container_width=True, height=600)
+
+    with tab3:
+        if st.session_state.results_data:
+            csv = pd.DataFrame(st.session_state.results_data).to_csv(index=False).encode('utf-8')
+            st.download_button("📥 Download Report", csv, "seo_report.csv", "text/csv")
 
 if __name__ == "__main__":
     main()
