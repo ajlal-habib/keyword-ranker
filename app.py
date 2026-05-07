@@ -31,21 +31,27 @@ def determine_page_type(url):
         return "Blog"
     return "Landing Page"
 
-def get_search_results(keyword, target_domain, api_key, gl="us", hl="en"):
+def get_search_results(keyword, target_domain, api_key, gl="us", hl="en", device="desktop"):
     headers = {
         'X-API-KEY': api_key,
         'Content-Type': 'application/json'
     }
     
     feature_str = "Standard"
+    best_rank = 101
+    best_url = "N/A"
     
-    global_rank = 0
-    for page in range(1, 6): # Loop precisely 5 pages (top 50 results)
+    total_results_count = "Unknown"
+    
+    for page in [1, 2]:
         payload = json.dumps({
             "q": keyword,
             "gl": gl,
             "hl": hl,
-            "page": page
+            "page": page,
+            "num": 25,
+            "autocorrect": False,
+            "device": device
         })
         
         try:
@@ -59,9 +65,9 @@ def get_search_results(keyword, target_domain, api_key, gl="us", hl="en"):
                 continue
                 
             results = response.json()
-            organic_results = results.get("organic", [])
             
             if page == 1:
+                total_results_count = results.get("searchInformation", {}).get("totalResults", "Unknown")
                 features = []
                 if "answerBox" in results:
                     features.append("Featured Snippet")
@@ -71,30 +77,40 @@ def get_search_results(keyword, target_domain, api_key, gl="us", hl="en"):
                     features.append("Top Stories")
                 feature_str = ", ".join(features) if features else "Standard"
                 
-            if not organic_results:
-                break
+            blocks_to_check = [
+                results.get("organic", []),
+                results.get("peopleAlsoAsk", []),
+                results.get("places", []),
+                results.get("localResults", [])
+            ]
+            
+            kg = results.get("knowledgeGraph", {})
+            if kg and isinstance(kg, dict):
+                blocks_to_check.append([kg])
                 
-            for result in organic_results:
-                link = result.get("link", "")
-                
-                # Use Serper's position if available, otherwise just use our own counter
-                # Serper's position is usually globally accurate across pages (e.g. 11 for pg 2)
-                rank = result.get("position")
-                if rank is None:
-                    global_rank += 1
-                    rank = global_rank
-                else:
-                    global_rank = max(global_rank, rank)
-                
-                # Strict subdomain and domain fuzzy matching requested by user
-                if target_domain.lower() in link.lower():
-                    return {"rank": rank, "url": link, "features": feature_str}
+            for block in blocks_to_check:
+                for item in block:
+                    link = item.get("link") or item.get("website") or ""
                     
+                    if link and target_domain.lower() in link.lower():
+                        rank = item.get("position")
+                        
+                        if rank is None:
+                            rank = 1 if page == 1 else 26
+                            
+                        if rank < best_rank:
+                            best_rank = rank
+                            best_url = link
+                            
         except Exception as e:
             if page == 1:
                 return {"error": "Error", "msg": str(e)}
             continue
             
+    if best_rank <= 50:
+        return {"rank": best_rank, "url": best_url, "features": feature_str}
+        
+    print(f"DEBUG: Keyword '{keyword}' returned N/A. API saw Total Results: {total_results_count}")
     return {"rank": ">50", "url": "N/A", "features": feature_str}
 
 def render_styling():
@@ -179,6 +195,7 @@ def main():
         with st.expander("Advanced Settings"):
             country_code = st.selectbox("Country", ["us", "uk", "ca", "au", "in"], index=0)
             language_code = st.selectbox("Language", ["en", "es", "fr", "de"], index=0)
+            device_type = st.selectbox("Device", ["desktop", "mobile"], index=0)
 
         st.divider()
         st.markdown("### 📥 Input Keywords")
@@ -225,7 +242,7 @@ def main():
                 
                 for i, kv in enumerate(keywords):
                     progress_text.text(f"Scanning: '{kv}' ({i+1}/{len(keywords)})")
-                    res = get_search_results(kv, root_domain, serpapi_key, country_code, language_code)
+                    res = get_search_results(kv, root_domain, serpapi_key, country_code, language_code, device_type)
                     
                     if "error" in res:
                         st.error(f"{res['error']}: {res['msg']}")
