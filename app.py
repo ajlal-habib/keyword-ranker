@@ -44,15 +44,14 @@ def get_search_results(keyword, target_domain, api_key, gl="us", hl="en", device
     """
     Scans top 100 Google results (10 pages x 10) via Serper.dev.
 
-    Rank is computed as: (ads on page 1) + (answerBox offset on page 1) +
-    cumulative organic counter. Ads and featured snippets appear above organic
-    results visually but are excluded from Serper.dev's organic array, so
-    without this adjustment the reported rank is always too optimistic.
-
-    The offset is only applied on page 1 — Google does not show top-of-page
-    ads on page 2+.
+    Uses a cumulative rank_counter — increments once per organic result
+    received across all pages. This is the most reliable position method
+    because Serper.dev's own `position` field resets to 1-10 on each page
+    and adding a location parameter changes which Google datacenter is hit,
+    producing different (less consistent) results.
 
     1 second between pages keeps requests within Serper.dev rate limits.
+    Without this pause, later pages fail silently and ranks look too low.
     """
     headers = {
         "X-API-KEY": api_key,
@@ -86,16 +85,9 @@ def get_search_results(keyword, target_domain, api_key, gl="us", hl="en", device
             if response.status_code != 200:
                 break
 
-            data = response.json()
-            organic = data.get("organic", [])
+            organic = response.json().get("organic", [])
             if not organic:
                 break
-
-            # Page 1 only: add slots taken by ads and answer box above organic results
-            if page == 1:
-                ads_count = len(data.get("ads", []))
-                answer_box = 1 if data.get("answerBox") else 0
-                rank_counter += ads_count + answer_box
 
             for result in organic:
                 rank_counter += 1
