@@ -25,32 +25,30 @@ def get_root_domain(url_or_domain):
         return str(url_or_domain).lower()
 
 def domain_matches(link, target_domain):
-    """Exact domain/subdomain match — never a substring match."""
+    """Exact domain/subdomain match — never a loose substring match."""
     result_domain = get_root_domain(link)
     return result_domain == target_domain or result_domain.endswith("." + target_domain)
 
 def determine_page_type(url):
-    if url == "N/A":
+    if not url or url == "N/A":
         return "N/A"
-    url_lower = url.lower()
-    if any(kw in url_lower for kw in ["/blog", "/article", "/post", "/news", "blog/", "article/", "post/"]):
+    u = url.lower()
+    if any(kw in u for kw in ["/blog", "/article", "/post", "/news", "blog/", "article/", "post/"]):
         return "Blog"
     return "Landing Page"
 
 def get_search_results(keyword, target_domain, api_key, gl="us", hl="en", device="desktop"):
     """
-    Fetch Google rankings via SerperDev.
+    Returns {"matches": [{"rank": int, "url": str}, ...]} — all URLs
+    from target_domain found in the top 100 organic results.
 
-    Why cumulative counter instead of SerperDev's position field:
-      SerperDev's `position` field resets to 1-10 on every page request.
-      A result at true rank 31 returns position=1 on page 4.
-      The counter increments once per organic result received across all
-      pages, so it always equals the true global rank regardless of page size.
+    Uses a cumulative rank_counter instead of SerperDev's `position` field
+    because that field resets to 1-10 on every page request (page-relative),
+    which would make rank 31 appear as 1 if found on page 4.
 
-    Why sleep between pages:
-      Without it, 10 rapid requests per keyword hit SerperDev's rate limit
-      mid-keyword, later pages fail silently, and the counter stops early —
-      making every rank appear falsely high (e.g. 3 instead of 31).
+    Sleeps 0.5 s between pages to stay within SerperDev rate limits.
+    Without this pause, rapid page fetches get throttled mid-keyword and
+    the counter stops early, making ranks look falsely low.
     """
     headers = {
         "X-API-KEY": api_key,
@@ -58,8 +56,9 @@ def get_search_results(keyword, target_domain, api_key, gl="us", hl="en", device
     }
 
     rank_counter = 0
+    matches = []       # All domain matches found across all pages
 
-    for page in range(1, 11):  # 10 pages × 10 results = top 100
+    for page in range(1, 11):   # 10 pages × 10 results = top 100
         payload = json.dumps({
             "q": keyword,
             "gl": gl,
@@ -80,22 +79,19 @@ def get_search_results(keyword, target_domain, api_key, gl="us", hl="en", device
             if response.status_code == 403:
                 return {"error": "API Key Error", "msg": "Unauthorized — check your Serper.dev API key."}
             if response.status_code in [402, 429]:
-                return {"error": "Rate Limited", "msg": "Serper.dev rate limit hit. Reduce keywords or upgrade plan."}
+                return {"error": "Rate Limited", "msg": "Serper.dev rate limit hit. Reduce keywords or upgrade your plan."}
             if response.status_code != 200:
-                # Any other failure corrupts the counter — stop cleanly
-                break
+                break   # Any other failure — stop cleanly, don't corrupt counter
 
-            data = response.json()
-            organic = data.get("organic", [])
-
+            organic = response.json().get("organic", [])
             if not organic:
-                break  # No more results from Google
+                break   # Google returned no more results
 
             for result in organic:
                 rank_counter += 1
                 link = result.get("link", "")
                 if domain_matches(link, target_domain):
-                    return {"rank": rank_counter, "url": link}
+                    matches.append({"rank": rank_counter, "url": link})
 
         except Exception as e:
             if page == 1:
@@ -103,11 +99,11 @@ def get_search_results(keyword, target_domain, api_key, gl="us", hl="en", device
             break
 
         # Pause between pages of the same keyword.
-        # Without this, rapid-fire requests trigger SerperDev rate limiting.
+        # Skipping this causes SerperDev to throttle after 2-3 keywords.
         if page < 10:
             time.sleep(0.5)
 
-    return {"rank": "Not in Top 100", "url": "N/A"}
+    return {"matches": matches}
 
 def render_styling():
     st.markdown("""
@@ -145,19 +141,19 @@ def render_styling():
         </style>
     """, unsafe_allow_html=True)
 
-def color_coding(val):
+def rank_color(val):
     try:
-        val_str = str(val)
-        if "Not in" in val_str or val_str.startswith(">"):
+        v = str(val)
+        if "Not in" in v or v == "N/A":
             return "background-color: rgba(239,68,68,0.1); color: #ef4444;"
-        val_int = int(val_str.split(",")[0].replace("Pos", "").strip())
-        if val_int <= 3:
+        n = int(v.split(",")[0].replace("Pos", "").strip())
+        if n <= 3:
             return "background-color: rgba(16,185,129,0.15); color: #10b981; font-weight: bold;"
-        elif val_int <= 10:
+        elif n <= 10:
             return "background-color: rgba(52,211,153,0.1); color: #34d399;"
-        elif val_int <= 30:
+        elif n <= 30:
             return "background-color: rgba(245,158,11,0.1); color: #f59e0b;"
-        elif val_int <= 100:
+        elif n <= 100:
             return "background-color: rgba(245,158,11,0.05); color: #d97706;"
         else:
             return "background-color: rgba(239,68,68,0.1); color: #ef4444;"
@@ -184,17 +180,17 @@ def main():
             placeholder="e.g. agtech.folio3.com",
             value=st.session_state.domain,
             help=(
-                "Enter the EXACT domain or subdomain to track.\n\n"
+                "Enter the EXACT domain or subdomain you want to track.\n\n"
                 "✅ agtech.folio3.com\n"
-                "❌ folio3.com  ← matches main site first, not your subdomain"
+                "❌ folio3.com  ← will also match the main site and return its rank instead of your subdomain's"
             ),
         )
         serper_key = st.text_input("Serper.dev API Key", type="password")
 
         with st.expander("Advanced Settings"):
-            country_code = st.selectbox("Country", ["us", "uk", "ca", "au", "in"], index=0)
-            language_code = st.selectbox("Language", ["en", "es", "fr", "de"], index=0)
-            device_type = st.selectbox("Device", ["desktop", "mobile"], index=0)
+            country_code  = st.selectbox("Country",  ["us", "uk", "ca", "au", "in"], index=0)
+            language_code = st.selectbox("Language", ["en", "es", "fr", "de"],        index=0)
+            device_type   = st.selectbox("Device",   ["desktop", "mobile"],           index=0)
 
         st.divider()
         st.markdown("### 📥 Input Keywords")
@@ -243,41 +239,56 @@ def main():
             elif not keywords:
                 st.error("Please add keywords to analyze.")
             else:
-                st.session_state.domain = target_domain
+                st.session_state.domain   = target_domain
                 st.session_state.results_data = []
 
-                root_domain = get_root_domain(target_domain)
+                root_domain   = get_root_domain(target_domain)
                 progress_text = st.empty()
-                progress_bar = st.progress(0)
+                progress_bar  = st.progress(0)
 
                 for i, kv in enumerate(keywords):
-                    progress_text.text(f"Scanning: '{kv}' ({i + 1}/{len(keywords)})")
+                    progress_text.text(f"Scanning: '{kv}'  ({i + 1}/{len(keywords)})")
                     res = get_search_results(kv, root_domain, serper_key, country_code, language_code, device_type)
 
                     if "error" in res:
                         st.error(f"{res['error']}: {res['msg']}")
                         break
 
-                    rank = res.get("rank", "Not in Top 100")
-                    url = res.get("url", "N/A")
-                    rank_str = str(rank)
+                    matches = res.get("matches", [])
 
-                    if rank_str.isdigit():
-                        display_rank = rank_str
-                        position = int(rank_str)
-                        page_type = determine_page_type(url)
+                    # ── Primary result (best rank found) ──────────────────────
+                    if matches:
+                        p_rank = str(matches[0]["rank"])
+                        p_url  = matches[0]["url"]
+                        p_pos  = matches[0]["rank"]
+                        p_type = determine_page_type(p_url)
                     else:
-                        display_rank = "Not in Top 100"
-                        position = 101
-                        page_type = "N/A"
+                        p_rank = "Not in Top 100"
+                        p_url  = "N/A"
+                        p_pos  = 101
+                        p_type = "N/A"
+
+                    # ── Secondary result (next ranked page, e.g. blog) ────────
+                    if len(matches) >= 2:
+                        s_rank = str(matches[1]["rank"])
+                        s_url  = matches[1]["url"]
+                        s_type = determine_page_type(s_url)
+                    else:
+                        s_rank = "N/A"
+                        s_url  = "N/A"
+                        s_type = "N/A"
 
                     st.session_state.results_data.append({
-                        "Keyword": kv,
-                        "Rank": display_rank,
-                        "Position": position,
-                        "URL": url,
-                        "Page Type": page_type,
+                        "Keyword":       kv,
+                        "Best Rank":     p_rank,
+                        "Best URL":      p_url,
+                        "Page Type":     p_type,
+                        "2nd Rank":      s_rank,
+                        "2nd URL":       s_url,
+                        "2nd Page Type": s_type,
+                        "Position":      p_pos,   # numeric, used by dashboard only
                     })
+
                     progress_bar.progress((i + 1) / len(keywords))
 
                     # 1-second pause between keywords keeps total request rate safe
@@ -290,19 +301,20 @@ def main():
 
     tab1, tab2, tab3 = st.tabs(["📊 Dashboard Overview", "🔍 Keyword Intelligence", "📑 Settings & Exports"])
 
+    # ── TAB 1: Dashboard ──────────────────────────────────────────────────────
     with tab1:
         if not st.session_state.results_data:
             st.info("Configure settings in the sidebar and click Analyze SERP to see your dashboard.")
         else:
-            df_res = pd.DataFrame(st.session_state.results_data)
+            df_res  = pd.DataFrame(st.session_state.results_data)
             all_pos = df_res["Position"].tolist()
-            ranked = [p for p in all_pos if p <= 100]
+            ranked  = [p for p in all_pos if p <= 100]
 
-            total_kw = len(df_res)
-            top_3   = sum(1 for p in all_pos if p <= 3)
-            top_10  = sum(1 for p in all_pos if p <= 10)
-            top_100 = sum(1 for p in all_pos if p <= 100)
-            avg_pos = sum(ranked) / len(ranked) if ranked else None
+            total_kw   = len(df_res)
+            top_3      = sum(1 for p in all_pos if p <= 3)
+            top_10     = sum(1 for p in all_pos if p <= 10)
+            top_100    = sum(1 for p in all_pos if p <= 100)
+            avg_pos    = sum(ranked) / len(ranked) if ranked else None
             visibility = round(top_10 / total_kw * 100, 1) if total_kw else 0
 
             col1, col2, col3, col4 = st.columns(4)
@@ -317,20 +329,20 @@ def main():
                 st.markdown(f'<div class="metric-container"><div class="metric-label">Avg Position</div><div class="metric-value">{avg_display}</div></div>', unsafe_allow_html=True)
 
             st.subheader("Insights & Distribution")
-            chart_col1, chart_col2 = st.columns([2, 1])
+            c1, c2 = st.columns([2, 1])
 
-            with chart_col1:
+            with c1:
                 st.markdown("##### Ranking Distribution")
                 dist = {
-                    "Pos 1-3":        top_3,
-                    "Pos 4-10":       top_10 - top_3,
-                    "Pos 11-30":      sum(1 for p in all_pos if 10 < p <= 30),
-                    "Pos 31-100":     sum(1 for p in all_pos if 30 < p <= 100),
-                    "Not Ranked":     total_kw - top_100,
+                    "Pos 1-3":    top_3,
+                    "Pos 4-10":   top_10 - top_3,
+                    "Pos 11-30":  sum(1 for p in all_pos if 10 < p <= 30),
+                    "Pos 31-100": sum(1 for p in all_pos if 30 < p <= 100),
+                    "Not Ranked": total_kw - top_100,
                 }
-                dist_df = pd.DataFrame(list(dist.items()), columns=["Range", "Count"])
                 fig = px.bar(
-                    dist_df, x="Range", y="Count", color="Range",
+                    pd.DataFrame(list(dist.items()), columns=["Range", "Count"]),
+                    x="Range", y="Count", color="Range",
                     color_discrete_sequence=["#10b981", "#34d399", "#fbbf24", "#f59e0b", "#4b5563"],
                     template="plotly_dark",
                 )
@@ -338,8 +350,8 @@ def main():
                                   plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)")
                 st.plotly_chart(fig, use_container_width=True)
 
-            with chart_col2:
-                st.markdown("##### Page Types")
+            with c2:
+                st.markdown("##### Page Types (Primary Results)")
                 pt = df_res[df_res["Page Type"] != "N/A"]["Page Type"].value_counts().reset_index()
                 pt.columns = ["Page Type", "Count"]
                 if not pt.empty:
@@ -355,22 +367,31 @@ def main():
                 else:
                     st.info("No ranked pages to show page types.")
 
+    # ── TAB 2: Keyword Intelligence ───────────────────────────────────────────
     with tab2:
         if not st.session_state.results_data:
             st.info("Run the tracker to view keyword intelligence.")
         else:
             st.subheader("Keyword Intelligence Data")
-            df_display = pd.DataFrame(st.session_state.results_data).drop(columns=["Position"], errors="ignore")
-            styled = df_display.style.map(color_coding, subset=["Rank"])
+            st.caption(
+                "Best Rank = highest-ranked URL from your domain. "
+                "2nd Rank = next URL from your domain (e.g. a blog post also ranking for this keyword)."
+            )
+            df_display = (
+                pd.DataFrame(st.session_state.results_data)
+                .drop(columns=["Position"], errors="ignore")
+            )
+            styled = df_display.style.map(rank_color, subset=["Best Rank", "2nd Rank"])
             st.dataframe(styled, use_container_width=True, height=500)
 
+    # ── TAB 3: Export ─────────────────────────────────────────────────────────
     with tab3:
         st.subheader("Data Export")
         if not st.session_state.results_data:
             st.info("No data to export yet.")
         else:
             st.markdown("Export your complete SERP report as a CSV file.")
-            df_export = pd.DataFrame(st.session_state.results_data)
+            df_export = pd.DataFrame(st.session_state.results_data).drop(columns=["Position"], errors="ignore")
             csv = df_export.to_csv(index=False).encode("utf-8")
             st.download_button(
                 label="📥 Download Report (CSV)",
