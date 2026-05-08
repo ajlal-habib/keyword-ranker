@@ -44,9 +44,13 @@ def get_search_results(keyword, target_domain, api_key, gl="us", hl="en", device
         'Content-Type': 'application/json'
     }
 
-    # Paginate through 10 pages × 10 results = top 100.
-    # We NEVER use SerperDev's `position` field — it resets to 1-10 per page.
-    # True global rank = (page-1)*10 + idx + 1, always correct.
+    # Paginate through up to 10 pages (top ~100 results).
+    # rank_counter increments once per organic result actually returned —
+    # this handles variable page sizes (Google often returns <10 organic
+    # results when ads, knowledge panels, or PAA boxes take slots).
+    # We never use SerperDev's `position` field — it resets to 1-10 per page.
+    rank_counter = 0
+
     for page in range(1, 11):
         payload = json.dumps({
             "q": keyword,
@@ -70,8 +74,7 @@ def get_search_results(keyword, target_domain, api_key, gl="us", hl="en", device
             if response.status_code in [402, 429]:
                 return {"error": "Quota Exceeded", "msg": "Serper account out of credits or rate limit reached."}
             if response.status_code != 200:
-                # Hard stop — don't skip pages or the rank formula breaks
-                break
+                break  # Stop — skipping pages would corrupt the counter
 
             data = response.json()
             organic = data.get("organic", [])
@@ -79,11 +82,11 @@ def get_search_results(keyword, target_domain, api_key, gl="us", hl="en", device
             if not organic:
                 break
 
-            for idx, result in enumerate(organic):
-                true_rank = (page - 1) * 10 + idx + 1
+            for result in organic:
+                rank_counter += 1
                 link = result.get("link", "")
                 if domain_matches(link, target_domain):
-                    return {"rank": true_rank, "url": link}
+                    return {"rank": rank_counter, "url": link}
 
         except Exception as e:
             if page == 1:
