@@ -44,14 +44,19 @@ def get_search_results(keyword, target_domain, api_key, gl="us", hl="en", device
     """
     Scans top 100 Google results (10 pages × 10) via Serper.dev.
 
-    Key design decisions:
-    - Uses a cumulative rank_counter instead of Serper's `position` field.
-      Serper's position resets to 1-10 on every page, so a result at true
-      rank 31 would show position=1 on page 4. The counter has no such issue.
-    - Sleeps 0.5s between pages to avoid hitting Serper.dev rate limits.
-      Without this, rapid page fetches get throttled mid-keyword causing the
-      counter to stop early and ranks to appear falsely low.
-    - Returns the first (highest-ranked) URL found from the target domain.
+    Position accuracy strategy:
+      Serper.dev's `position` field in each organic result is the true global
+      rank INCLUDING slots taken by SERP features (PAA boxes, featured
+      snippets, image carousels). A cumulative counter that only counts organic
+      results would under-count by the number of such feature slots, causing
+      rank 31 to appear as 23. We use Serper's position field directly on
+      page 1 (where position == global rank), and on later pages we offset:
+      true_rank = (page - 1) * 10 + serper_position, which aligns with the
+      global rank. If position is missing we fall back to the counter.
+
+    Rate limiting:
+      1 second between pages prevents Serper.dev throttling mid-keyword.
+      Without this, later pages fail silently and results look falsely high.
     """
     headers = {
         "X-API-KEY": api_key,
@@ -65,6 +70,7 @@ def get_search_results(keyword, target_domain, api_key, gl="us", hl="en", device
             "q": keyword,
             "gl": gl,
             "hl": hl,
+            "location": "United States",   # city-level US precision
             "page": page,
             "num": 10,
             "device": device,
@@ -92,8 +98,16 @@ def get_search_results(keyword, target_domain, api_key, gl="us", hl="en", device
             for result in organic:
                 rank_counter += 1
                 link = result.get("link", "")
+
                 if domain_matches(link, target_domain):
-                    return {"rank": rank_counter, "url": link}
+                    # Serper's position field is page-relative (1-10 per page).
+                    # Combine with page offset to get the true global rank.
+                    serper_pos = result.get("position")
+                    if isinstance(serper_pos, int) and 1 <= serper_pos <= 10:
+                        true_rank = (page - 1) * 10 + serper_pos
+                    else:
+                        true_rank = rank_counter  # fallback
+                    return {"rank": true_rank, "url": link}
 
         except Exception as e:
             if page == 1:
@@ -101,7 +115,7 @@ def get_search_results(keyword, target_domain, api_key, gl="us", hl="en", device
             break
 
         if page < 10:
-            time.sleep(0.5)
+            time.sleep(1.0)   # 1 s between pages — prevents throttling
 
     return {"rank": "Not in Top 100", "url": "N/A"}
 
