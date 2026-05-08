@@ -44,56 +44,45 @@ def get_search_results(keyword, target_domain, api_key, gl="us", hl="en", device
         'Content-Type': 'application/json'
     }
 
-    for page in range(1, 6):  # Pages 1–5 = top 50 results
-        payload = json.dumps({
-            "q": keyword,
-            "gl": gl,
-            "hl": hl,
-            "page": page,
-            "num": 10,
-            "device": device
-        })
+    # Single request for top 100 — avoids all pagination position bugs.
+    # SerperDev's `position` field resets to 1-10 on every page, so we
+    # use the array index (idx+1) which is always the true global rank.
+    payload = json.dumps({
+        "q": keyword,
+        "gl": gl,
+        "hl": hl,
+        "num": 100,
+        "device": device
+    })
 
-        try:
-            response = requests.post(
-                "https://google.serper.dev/search",
-                headers=headers,
-                data=payload,
-                timeout=15
-            )
+    try:
+        response = requests.post(
+            "https://google.serper.dev/search",
+            headers=headers,
+            data=payload,
+            timeout=20
+        )
 
-            if response.status_code == 403:
-                return {"error": "API Key Error", "msg": "Unauthorized: Please check your Serper.dev API key."}
-            elif response.status_code in [402, 429]:
-                return {"error": "Quota Exceeded", "msg": "Serper account out of credits or rate limit reached."}
-            elif response.status_code != 200:
-                # Non-fatal page error — skip this page but keep searching
-                continue
+        if response.status_code == 403:
+            return {"error": "API Key Error", "msg": "Unauthorized: Please check your Serper.dev API key."}
+        if response.status_code in [402, 429]:
+            return {"error": "Quota Exceeded", "msg": "Serper account out of credits or rate limit reached."}
+        if response.status_code != 200:
+            return {"error": f"HTTP {response.status_code}", "msg": response.text[:200]}
 
-            results = response.json()
-            organic_results = results.get("organic", [])
+        data = response.json()
+        organic = data.get("organic", [])
 
-            if not organic_results:
-                # No more results — stop paginating
-                break
+        for idx, result in enumerate(organic):
+            link = result.get("link", "")
+            if domain_matches(link, target_domain):
+                # idx is 0-based; idx+1 is the true organic rank (1 = #1 on Google)
+                return {"rank": idx + 1, "url": link}
 
-            for result in organic_results:
-                link = result.get("link", "")
+        return {"rank": "Not in Top 100", "url": "N/A"}
 
-                if domain_matches(link, target_domain):
-                    # SerperDev returns the global absolute position (1-based across all pages)
-                    position = result.get("position")
-                    if not isinstance(position, int):
-                        # Fallback: estimate from page index if field missing
-                        position = (page - 1) * 10 + organic_results.index(result) + 1
-                    return {"rank": position, "url": link}
-
-        except Exception as e:
-            if page == 1:
-                return {"error": "Error", "msg": str(e)}
-            continue
-
-    return {"rank": "Not in Top 50", "url": "N/A"}
+    except Exception as e:
+        return {"error": "Error", "msg": str(e)}
 
 def render_styling():
     st.markdown("""
@@ -148,10 +137,10 @@ def color_coding(val):
             return 'background-color: rgba(16, 185, 129, 0.15); color: #10b981; font-weight: bold;'
         elif val_int <= 10:
             return 'background-color: rgba(52, 211, 153, 0.1); color: #34d399;'
-        elif val_int <= 20:
+        elif val_int <= 30:
             return 'background-color: rgba(245, 158, 11, 0.1); color: #f59e0b;'
-        elif val_int <= 50:
-            return 'background-color: rgba(245, 158, 11, 0.1); color: #f59e0b;'
+        elif val_int <= 100:
+            return 'background-color: rgba(245, 158, 11, 0.05); color: #d97706;'
         else:
             return 'background-color: rgba(239, 68, 68, 0.1); color: #ef4444;'
     except:
@@ -226,16 +215,17 @@ def main():
                         st.error(f"{res['error']}: {res['msg']}")
                         break
 
-                    rank = res.get("rank", "Not in Top 50")
+                    rank = res.get("rank", "Not in Top 100")
                     url = res.get("url", "N/A")
 
-                    if rank != "Not in Top 50":
-                        display_rank = str(rank)
-                        position = int(rank) if str(rank).isdigit() else 51
+                    rank_str = str(rank)
+                    if rank_str.isdigit():
+                        display_rank = rank_str
+                        position = int(rank_str)
                         page_type = determine_page_type(url)
                     else:
-                        display_rank = "Not in Top 50"
-                        position = 51
+                        display_rank = "Not in Top 100"
+                        position = 101
                         page_type = "N/A"
 
                     st.session_state.results_data.append({
@@ -267,13 +257,13 @@ def main():
             display_positions = []
             for p in df_res["Position"]:
                 all_positions.append(p)
-                if p <= 50:
+                if p <= 100:
                     display_positions.append(p)
 
             total_kw = len(df_res)
             top_3 = len([p for p in all_positions if p <= 3])
             top_10 = len([p for p in all_positions if p <= 10])
-            top_50 = len([p for p in all_positions if p <= 50])
+            top_100 = len([p for p in all_positions if p <= 100])
 
             avg_pos = sum(display_positions) / len(display_positions) if display_positions else "N/A"
             visibility = round((top_10 / total_kw * 100) if total_kw > 0 else 0, 1)
@@ -299,9 +289,9 @@ def main():
                 dist = {
                     "Pos 1-3": top_3,
                     "Pos 4-10": top_10 - top_3,
-                    "Pos 11-20": len([p for p in all_positions if 10 < p <= 20]),
-                    "Pos 21-50": len([p for p in all_positions if 20 < p <= 50]),
-                    "Not Ranked (>50)": total_kw - len([p for p in df_res["Position"] if p <= 50])
+                    "Pos 11-30": len([p for p in all_positions if 10 < p <= 30]),
+                    "Pos 31-100": len([p for p in all_positions if 30 < p <= 100]),
+                    "Not Ranked (>100)": total_kw - top_100
                 }
 
                 dist_df = pd.DataFrame(list(dist.items()), columns=["Position Range", "Count"])
