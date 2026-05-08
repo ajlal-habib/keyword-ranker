@@ -44,45 +44,53 @@ def get_search_results(keyword, target_domain, api_key, gl="us", hl="en", device
         'Content-Type': 'application/json'
     }
 
-    # Single request for top 100 — avoids all pagination position bugs.
-    # SerperDev's `position` field resets to 1-10 on every page, so we
-    # use the array index (idx+1) which is always the true global rank.
-    payload = json.dumps({
-        "q": keyword,
-        "gl": gl,
-        "hl": hl,
-        "num": 100,
-        "device": device
-    })
+    # Paginate through 10 pages × 10 results = top 100.
+    # We NEVER use SerperDev's `position` field — it resets to 1-10 per page.
+    # True global rank = (page-1)*10 + idx + 1, always correct.
+    for page in range(1, 11):
+        payload = json.dumps({
+            "q": keyword,
+            "gl": gl,
+            "hl": hl,
+            "page": page,
+            "num": 10,
+            "device": device
+        })
 
-    try:
-        response = requests.post(
-            "https://google.serper.dev/search",
-            headers=headers,
-            data=payload,
-            timeout=20
-        )
+        try:
+            response = requests.post(
+                "https://google.serper.dev/search",
+                headers=headers,
+                data=payload,
+                timeout=15
+            )
 
-        if response.status_code == 403:
-            return {"error": "API Key Error", "msg": "Unauthorized: Please check your Serper.dev API key."}
-        if response.status_code in [402, 429]:
-            return {"error": "Quota Exceeded", "msg": "Serper account out of credits or rate limit reached."}
-        if response.status_code != 200:
-            return {"error": f"HTTP {response.status_code}", "msg": response.text[:200]}
+            if response.status_code == 403:
+                return {"error": "API Key Error", "msg": "Unauthorized: Please check your Serper.dev API key."}
+            if response.status_code in [402, 429]:
+                return {"error": "Quota Exceeded", "msg": "Serper account out of credits or rate limit reached."}
+            if response.status_code != 200:
+                # Hard stop — don't skip pages or the rank formula breaks
+                break
 
-        data = response.json()
-        organic = data.get("organic", [])
+            data = response.json()
+            organic = data.get("organic", [])
 
-        for idx, result in enumerate(organic):
-            link = result.get("link", "")
-            if domain_matches(link, target_domain):
-                # idx is 0-based; idx+1 is the true organic rank (1 = #1 on Google)
-                return {"rank": idx + 1, "url": link}
+            if not organic:
+                break
 
-        return {"rank": "Not in Top 100", "url": "N/A"}
+            for idx, result in enumerate(organic):
+                true_rank = (page - 1) * 10 + idx + 1
+                link = result.get("link", "")
+                if domain_matches(link, target_domain):
+                    return {"rank": true_rank, "url": link}
 
-    except Exception as e:
-        return {"error": "Error", "msg": str(e)}
+        except Exception as e:
+            if page == 1:
+                return {"error": "Error", "msg": str(e)}
+            break
+
+    return {"rank": "Not in Top 100", "url": "N/A"}
 
 def render_styling():
     st.markdown("""
