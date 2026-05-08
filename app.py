@@ -66,11 +66,16 @@ def get_search_results(keyword, target_domain, api_key, gl="us", hl="en", device
     rank_counter = 0
 
     for page in range(1, 11):
+        location_map = {
+            "us": "United States", "pk": "Pakistan",
+            "uk": "United Kingdom", "ca": "Canada",
+            "au": "Australia", "in": "India",
+        }
         payload = json.dumps({
             "q": keyword,
             "gl": gl,
             "hl": hl,
-            "location": "United States",   # city-level US precision
+            "location": location_map.get(gl, "United States"),
             "page": page,
             "num": 10,
             "device": device,
@@ -185,7 +190,7 @@ def main():
     render_styling()
 
     st.title("🎯 AI Keyword Tracker")
-    st.markdown("Real-time Google rank tracking powered by Serper.dev")
+    st.markdown("Real-time Google rank tracking")
 
     with st.sidebar:
         st.header("⚙️ Configuration")
@@ -198,9 +203,9 @@ def main():
         serper_key = st.text_input("Serper.dev API Key", type="password")
 
         with st.expander("Advanced Settings"):
-            country_code  = st.selectbox("Country",  ["us", "uk", "ca", "au", "in"], index=0)
-            language_code = st.selectbox("Language", ["en", "es", "fr", "de"],        index=0)
-            device_type   = st.selectbox("Device",   ["desktop", "mobile"],           index=0)
+            country_code  = st.selectbox("Country",  ["us", "pk", "uk", "ca", "au", "in"], index=0)
+            language_code = st.selectbox("Language", ["en", "es", "fr", "de"],              index=0)
+            device_type   = st.selectbox("Device",   ["desktop", "mobile"],                 index=0)
 
         st.divider()
         st.markdown("### 📥 Input Keywords")
