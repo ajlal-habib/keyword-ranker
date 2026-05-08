@@ -42,21 +42,16 @@ def determine_page_type(url):
 
 def get_search_results(keyword, target_domain, api_key, gl="us", hl="en", device="desktop"):
     """
-    Scans top 100 Google results (10 pages × 10) via Serper.dev.
+    Scans top 100 Google results (10 pages x 10) via Serper.dev.
 
-    Position accuracy strategy:
-      Serper.dev's `position` field in each organic result is the true global
-      rank INCLUDING slots taken by SERP features (PAA boxes, featured
-      snippets, image carousels). A cumulative counter that only counts organic
-      results would under-count by the number of such feature slots, causing
-      rank 31 to appear as 23. We use Serper's position field directly on
-      page 1 (where position == global rank), and on later pages we offset:
-      true_rank = (page - 1) * 10 + serper_position, which aligns with the
-      global rank. If position is missing we fall back to the counter.
+    Uses a cumulative rank_counter — increments once per organic result
+    received across all pages. This is the most reliable position method
+    because Serper.dev's own `position` field resets to 1-10 on each page
+    and adding a location parameter changes which Google datacenter is hit,
+    producing different (less consistent) results.
 
-    Rate limiting:
-      1 second between pages prevents Serper.dev throttling mid-keyword.
-      Without this, later pages fail silently and results look falsely high.
+    1 second between pages keeps requests within Serper.dev rate limits.
+    Without this pause, later pages fail silently and ranks look too low.
     """
     headers = {
         "X-API-KEY": api_key,
@@ -66,16 +61,10 @@ def get_search_results(keyword, target_domain, api_key, gl="us", hl="en", device
     rank_counter = 0
 
     for page in range(1, 11):
-        location_map = {
-            "us": "United States", "pk": "Pakistan",
-            "uk": "United Kingdom", "ca": "Canada",
-            "au": "Australia", "in": "India",
-        }
         payload = json.dumps({
             "q": keyword,
             "gl": gl,
             "hl": hl,
-            "location": location_map.get(gl, "United States"),
             "page": page,
             "num": 10,
             "device": device,
@@ -103,16 +92,8 @@ def get_search_results(keyword, target_domain, api_key, gl="us", hl="en", device
             for result in organic:
                 rank_counter += 1
                 link = result.get("link", "")
-
                 if domain_matches(link, target_domain):
-                    # Serper's position field is page-relative (1-10 per page).
-                    # Combine with page offset to get the true global rank.
-                    serper_pos = result.get("position")
-                    if isinstance(serper_pos, int) and 1 <= serper_pos <= 10:
-                        true_rank = (page - 1) * 10 + serper_pos
-                    else:
-                        true_rank = rank_counter  # fallback
-                    return {"rank": true_rank, "url": link}
+                    return {"rank": rank_counter, "url": link}
 
         except Exception as e:
             if page == 1:
@@ -120,7 +101,7 @@ def get_search_results(keyword, target_domain, api_key, gl="us", hl="en", device
             break
 
         if page < 10:
-            time.sleep(1.0)   # 1 s between pages — prevents throttling
+            time.sleep(1.0)
 
     return {"rank": "Not in Top 100", "url": "N/A"}
 
@@ -190,20 +171,20 @@ def main():
     render_styling()
 
     st.title("🎯 AI Keyword Tracker")
-    st.markdown("Real-time Google rank tracking")
+    st.markdown("Real-time Google rank tracking powered by Serper.dev")
 
     with st.sidebar:
         st.header("⚙️ Configuration")
         target_domain = st.text_input(
             "Target Domain",
-            placeholder="e.g. domain.com",
+            placeholder="e.g. agtech.folio3.com",
             value=st.session_state.domain,
             help="Enter the exact domain or subdomain — e.g. agtech.folio3.com, not folio3.com",
         )
         serper_key = st.text_input("Serper.dev API Key", type="password")
 
         with st.expander("Advanced Settings"):
-            country_code  = st.selectbox("Country",  ["us", "pk", "uk", "ca", "au", "in"], index=0)
+            country_code  = st.selectbox("Country",  ["us", "uk", "ca", "au", "in", "pk"], index=0)
             language_code = st.selectbox("Language", ["en", "es", "fr", "de"],              index=0)
             device_type   = st.selectbox("Device",   ["desktop", "mobile"],                 index=0)
 
