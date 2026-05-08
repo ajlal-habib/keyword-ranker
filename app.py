@@ -196,7 +196,7 @@ def main():
         st.header("⚙️ Configuration")
         target_domain = st.text_input(
             "Target Domain",
-            placeholder="e.g. agtech.folio3.com",
+            placeholder="e.g. domain.com",
             value=st.session_state.domain,
             help="Enter the exact domain or subdomain — e.g. agtech.folio3.com, not folio3.com",
         )
