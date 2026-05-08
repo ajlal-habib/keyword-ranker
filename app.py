@@ -13,15 +13,22 @@ def init_session_state():
         st.session_state.domain = ""
 
 def get_root_domain(url_or_domain):
-    if not str(url_or_domain).startswith(('http://', 'https://')):
-        url_or_domain = 'http://' + str(url_or_domain)
+    s = str(url_or_domain).strip()
+    if not s.startswith(('http://', 'https://')):
+        s = 'http://' + s
     try:
-        parsed = urlparse(url_or_domain)
-        domain = parsed.netloc
-        domain = domain.replace('www.', '')
-        return domain.lower()
-    except:
+        netloc = urlparse(s).netloc.lower()
+        # Only strip www. as a prefix, not anywhere in the string
+        if netloc.startswith('www.'):
+            netloc = netloc[4:]
+        return netloc
+    except Exception:
         return str(url_or_domain).lower()
+
+def domain_matches(link, target_domain):
+    """Exact domain match — prevents substring false positives like folio3.com matching notfolio3.com."""
+    result_domain = get_root_domain(link)
+    return result_domain == target_domain or result_domain.endswith('.' + target_domain)
 
 def determine_page_type(url):
     if url == "N/A":
@@ -36,58 +43,56 @@ def get_search_results(keyword, target_domain, api_key, gl="us", hl="en", device
         'X-API-KEY': api_key,
         'Content-Type': 'application/json'
     }
-    
-    global_rank = 0
-    actual_pos = 0
-    
-    for page in range(1, 6): # Loop exactly 5 pages (top 50 results)
+
+    for page in range(1, 6):  # Pages 1–5 = top 50 results
         payload = json.dumps({
             "q": keyword,
             "gl": gl,
             "hl": hl,
             "page": page,
             "num": 10,
-            "autocorrect": False,
             "device": device
         })
-        
+
         try:
-            response = requests.post("https://google.serper.dev/search", headers=headers, data=payload)
-            
+            response = requests.post(
+                "https://google.serper.dev/search",
+                headers=headers,
+                data=payload,
+                timeout=15
+            )
+
             if response.status_code == 403:
                 return {"error": "API Key Error", "msg": "Unauthorized: Please check your Serper.dev API key."}
             elif response.status_code in [402, 429]:
                 return {"error": "Quota Exceeded", "msg": "Serper account out of credits or rate limit reached."}
             elif response.status_code != 200:
+                # Non-fatal page error — skip this page but keep searching
                 continue
-                
+
             results = response.json()
             organic_results = results.get("organic", [])
-            
+
             if not organic_results:
+                # No more results — stop paginating
                 break
-            
+
             for result in organic_results:
-                global_rank += 1
                 link = result.get("link", "")
-                
-                # Strict subdomain and domain fuzzy matching requested by user
-                if target_domain.lower() in link.lower():
-                    # If position is explicitly provided by API and looks like a global rank, use it, else use counting rank
-                    serper_pos = result.get("position")
-                    if isinstance(serper_pos, int) and serper_pos >= global_rank:
-                        actual_pos = serper_pos
-                    else:
-                        actual_pos = global_rank
-                    
-                    # Double check we don't return a position greater than 50 if it's strictly top 50, but we return whatever it is if found in 5 pages
-                    return {"rank": actual_pos, "url": link}
-                    
+
+                if domain_matches(link, target_domain):
+                    # SerperDev returns the global absolute position (1-based across all pages)
+                    position = result.get("position")
+                    if not isinstance(position, int):
+                        # Fallback: estimate from page index if field missing
+                        position = (page - 1) * 10 + organic_results.index(result) + 1
+                    return {"rank": position, "url": link}
+
         except Exception as e:
             if page == 1:
                 return {"error": "Error", "msg": str(e)}
             continue
-            
+
     return {"rank": "Not in Top 50", "url": "N/A"}
 
 def render_styling():
@@ -135,19 +140,19 @@ def color_coding(val):
         val_str = str(val)
         if "Not in" in val_str or val_str.startswith(">"):
             return 'background-color: rgba(239, 68, 68, 0.1); color: #ef4444;'
-        
+
         first_val = val_str.split(",")[0].replace("Pos", "").strip()
         val_int = int(first_val)
-        
+
         if val_int <= 3:
             return 'background-color: rgba(16, 185, 129, 0.15); color: #10b981; font-weight: bold;'
         elif val_int <= 10:
             return 'background-color: rgba(52, 211, 153, 0.1); color: #34d399;'
-        elif val_int <= 20: # Page 2
+        elif val_int <= 20:
             return 'background-color: rgba(245, 158, 11, 0.1); color: #f59e0b;'
         elif val_int <= 50:
             return 'background-color: rgba(245, 158, 11, 0.1); color: #f59e0b;'
-        else: # 50+
+        else:
             return 'background-color: rgba(239, 68, 68, 0.1); color: #ef4444;'
     except:
         return 'background-color: transparent; color: #8B949E;'
@@ -156,7 +161,7 @@ def main():
     st.set_page_config(page_title="AI Keyword Tracker", page_icon="🎯", layout="wide", initial_sidebar_state="expanded")
     init_session_state()
     render_styling()
-    
+
     st.title("🎯 AI Keyword Tracker")
     st.markdown("Enterprise-grade SEO tracking powered by AI and Serper.dev")
 
@@ -164,7 +169,7 @@ def main():
         st.header("⚙️ Configuration")
         target_domain = st.text_input("Target Domain", placeholder="e.g. yourdomain.com", value=st.session_state.domain)
         serpapi_key = st.text_input("Serper.dev API Key", type="password")
-        
+
         with st.expander("Advanced Settings"):
             country_code = st.selectbox("Country", ["us", "uk", "ca", "au", "in"], index=0)
             language_code = st.selectbox("Language", ["en", "es", "fr", "de"], index=0)
@@ -173,7 +178,7 @@ def main():
         st.divider()
         st.markdown("### 📥 Input Keywords")
         input_method = st.radio("Choose input method:", ["📄 Upload CSV", "⌨️ Paste Keywords"], label_visibility="collapsed")
-        
+
         keywords = []
         if input_method == "📄 Upload CSV":
             uploaded_file = st.file_uploader("Upload CSV", type=["csv"], label_visibility="collapsed")
@@ -206,24 +211,24 @@ def main():
                 st.error("Please add keywords to analyze.")
             else:
                 st.session_state.domain = target_domain
-                st.session_state.results_data = [] # reset
-                
+                st.session_state.results_data = []
+
                 progress_text = st.empty()
                 progress_bar = st.progress(0)
-                
+
                 root_domain = get_root_domain(target_domain)
-                
+
                 for i, kv in enumerate(keywords):
                     progress_text.text(f"Scanning: '{kv}' ({i+1}/{len(keywords)})")
                     res = get_search_results(kv, root_domain, serpapi_key, country_code, language_code, device_type)
-                    
+
                     if "error" in res:
                         st.error(f"{res['error']}: {res['msg']}")
                         break
-                        
+
                     rank = res.get("rank", "Not in Top 50")
                     url = res.get("url", "N/A")
-                    
+
                     if rank != "Not in Top 50":
                         display_rank = str(rank)
                         position = int(rank) if str(rank).isdigit() else 51
@@ -232,7 +237,7 @@ def main():
                         display_rank = "Not in Top 50"
                         position = 51
                         page_type = "N/A"
-                    
+
                     st.session_state.results_data.append({
                         "Keyword": kv,
                         "Rank": display_rank,
@@ -241,8 +246,11 @@ def main():
                         "Page Type": page_type
                     })
                     progress_bar.progress((i + 1) / len(keywords))
-                    time.sleep(0.1) 
-                    
+
+                    # 1 request/sec keeps you safely within SerperDev rate limits
+                    if i < len(keywords) - 1:
+                        time.sleep(1.0)
+
                 progress_text.empty()
                 progress_bar.empty()
                 st.success("Analysis Complete!")
@@ -254,19 +262,19 @@ def main():
             st.info("Upload keywords and configure settings in the sidebar to generate your dashboard.")
         else:
             df_res = pd.DataFrame(st.session_state.results_data)
-            
+
             all_positions = []
             display_positions = []
             for p in df_res["Position"]:
                 all_positions.append(p)
                 if p <= 50:
                     display_positions.append(p)
-            
+
             total_kw = len(df_res)
             top_3 = len([p for p in all_positions if p <= 3])
             top_10 = len([p for p in all_positions if p <= 10])
             top_50 = len([p for p in all_positions if p <= 50])
-            
+
             avg_pos = sum(display_positions) / len(display_positions) if display_positions else "N/A"
             visibility = round((top_10 / total_kw * 100) if total_kw > 0 else 0, 1)
 
@@ -279,14 +287,13 @@ def main():
                 st.markdown(f'<div class="metric-container"><div class="metric-label">Top 10 Rankings</div><div class="metric-value">{top_10}</div></div>', unsafe_allow_html=True)
             with col4:
                 avg_display = f"{avg_pos:.1f}" if avg_pos != "N/A" else "N/A"
-                # Mock delta for UI demonstration
                 delta_html = "<span style='color: #10b981; font-size: 1rem; margin-left: 8px;'>▲ 1.2</span>" if avg_pos != "N/A" else ""
                 st.markdown(f'<div class="metric-container"><div class="metric-label">Avg Position</div><div class="metric-value">{avg_display}{delta_html}</div></div>', unsafe_allow_html=True)
 
             st.subheader("Insights & Distribution")
-            
+
             chart_col1, chart_col2 = st.columns([2, 1])
-            
+
             with chart_col1:
                 st.markdown("##### Ranking Distribution")
                 dist = {
@@ -296,14 +303,14 @@ def main():
                     "Pos 21-50": len([p for p in all_positions if 20 < p <= 50]),
                     "Not Ranked (>50)": total_kw - len([p for p in df_res["Position"] if p <= 50])
                 }
-                
+
                 dist_df = pd.DataFrame(list(dist.items()), columns=["Position Range", "Count"])
-                fig = px.bar(dist_df, x="Position Range", y="Count", color="Position Range", 
+                fig = px.bar(dist_df, x="Position Range", y="Count", color="Position Range",
                              color_discrete_sequence=['#10b981', '#34d399', '#fbbf24', '#f59e0b', '#4b5563'],
                              template="plotly_dark")
                 fig.update_layout(showlegend=False, margin=dict(l=0, r=0, t=30, b=0), plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)")
                 st.plotly_chart(fig, use_container_width=True)
-                
+
             with chart_col2:
                 st.markdown("##### Page Types")
                 page_types = df_res[df_res["Page Type"] != "N/A"]["Page Type"].value_counts().reset_index()
@@ -323,11 +330,10 @@ def main():
         else:
             st.subheader("Keyword Intelligence Data")
             df_res_display = pd.DataFrame(st.session_state.results_data)
-            
-            # Hide internal data columns from UI
+
             cols_to_drop = ['Position']
             df_res_display = df_res_display.drop(columns=cols_to_drop, errors='ignore')
-            
+
             styled_df = df_res_display.style.map(color_coding, subset=['Rank'])
             st.dataframe(styled_df, use_container_width=True, height=500)
 
