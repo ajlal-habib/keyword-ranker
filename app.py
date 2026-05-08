@@ -6,11 +6,17 @@ import time
 import plotly.express as px
 from urllib.parse import urlparse
 
+REQUIRED_COLUMNS = {"Keyword", "Best Rank", "Best URL", "Page Type", "2nd Rank", "2nd URL", "2nd Page Type"}
+
 def init_session_state():
-    if "results_data" not in st.session_state:
-        st.session_state.results_data = []
     if "domain" not in st.session_state:
         st.session_state.domain = ""
+    # Clear results if they come from an older schema (different column names)
+    existing = st.session_state.get("results_data", [])
+    if existing and not REQUIRED_COLUMNS.issubset(existing[0].keys()):
+        st.session_state.results_data = []
+    elif "results_data" not in st.session_state:
+        st.session_state.results_data = []
 
 def get_root_domain(url_or_domain):
     s = str(url_or_domain).strip()
@@ -381,7 +387,8 @@ def main():
                 pd.DataFrame(st.session_state.results_data)
                 .drop(columns=["Position"], errors="ignore")
             )
-            styled = df_display.style.map(rank_color, subset=["Best Rank", "2nd Rank"])
+            style_cols = [c for c in ["Best Rank", "2nd Rank"] if c in df_display.columns]
+            styled = df_display.style.map(rank_color, subset=style_cols)
             st.dataframe(styled, use_container_width=True, height=500)
 
     # ── TAB 3: Export ─────────────────────────────────────────────────────────
