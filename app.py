@@ -6,36 +6,16 @@ import time
 import plotly.express as px
 from urllib.parse import urlparse
 
-# ---------------------------------------------------------------------------
-# Location options — DataForSEO accepts exact location_name strings
-# ---------------------------------------------------------------------------
-LOCATIONS = {
-    "United States":                  "United States",
-    "United Kingdom":                 "United Kingdom",
-    "Canada":                         "Canada",
-    "Australia":                      "Australia",
-    "India":                          "India",
-    "Pakistan":                       "Pakistan",
-    "New York, US":                   "New York,New York,United States",
-    "Los Angeles, US":                "Los Angeles,California,United States",
-    "Chicago, US":                    "Chicago,Illinois,United States",
-    "Houston, US":                    "Houston,Texas,United States",
-}
-
-# ---------------------------------------------------------------------------
-# Session state
-# ---------------------------------------------------------------------------
 def init_session_state():
     if "domain" not in st.session_state:
         st.session_state.domain = ""
-    if "results_data" not in st.session_state:
+    # Clear stale results from older schema versions
+    existing = st.session_state.get("results_data", [])
+    if existing and "Rank" not in existing[0]:
         st.session_state.results_data = []
-    elif st.session_state.results_data and "Rank" not in st.session_state.results_data[0]:
+    elif "results_data" not in st.session_state:
         st.session_state.results_data = []
 
-# ---------------------------------------------------------------------------
-# Domain helpers
-# ---------------------------------------------------------------------------
 def get_root_domain(url_or_domain):
     s = str(url_or_domain).strip()
     if not s.startswith(("http://", "https://")):
@@ -60,90 +40,71 @@ def determine_page_type(url):
         return "Blog"
     return "Landing Page"
 
-# ---------------------------------------------------------------------------
-# DataForSEO Live API call
-# ---------------------------------------------------------------------------
-def get_search_results(keyword, target_domain, login, password, location, language, device):
+def get_search_results(keyword, target_domain, api_key, gl="us", hl="en", device="desktop"):
     """
-    Queries DataForSEO Live SERP API.
+    Scans top 100 Google results (10 pages x 10) via Serper.dev.
 
-    Returns rank_absolute — the true visual position on Google including ads,
-    featured snippets, and all other SERP features. One API call covers the
-    full top-100, no pagination needed.
+    Uses a cumulative rank_counter — increments once per organic result
+    received across all pages. This is the most reliable position method
+    because Serper.dev's own `position` field resets to 1-10 on each page
+    and adding a location parameter changes which Google datacenter is hit,
+    producing different (less consistent) results.
+
+    1 second between pages keeps requests within Serper.dev rate limits.
+    Without this pause, later pages fail silently and ranks look too low.
     """
-    headers = {"Content-Type": "application/json"}
-    payload = json.dumps([{
-        "keyword":       keyword,
-        "location_name": location,
-        "language_name": language,
-        "device":        device,
-        "os":            "windows",
-        "depth":         100,
-    }])
+    headers = {
+        "X-API-KEY": api_key,
+        "Content-Type": "application/json",
+    }
 
-    for attempt in range(2):
+    rank_counter = 0
+
+    for page in range(1, 11):
+        payload = json.dumps({
+            "q": keyword,
+            "gl": gl,
+            "hl": hl,
+            "page": page,
+            "num": 10,
+            "device": device,
+        })
+
         try:
             response = requests.post(
-                "https://api.dataforseo.com/v3/serp/google/organic/live/regular",
+                "https://google.serper.dev/search",
                 headers=headers,
                 data=payload,
-                auth=(login, password),
-                timeout=30,
+                timeout=15,
             )
 
-            if response.status_code == 401:
-                return {"error": "Auth Error", "msg": "Invalid DataForSEO login or password."}
-            if response.status_code == 402:
-                return {"error": "Insufficient Credits", "msg": "Top up your DataForSEO balance."}
+            if response.status_code == 403:
+                return {"error": "API Key Error", "msg": "Unauthorized — check your Serper.dev API key."}
+            if response.status_code in [402, 429]:
+                return {"error": "Rate Limited", "msg": "Serper.dev rate limit hit. Reduce keywords or upgrade plan."}
             if response.status_code != 200:
-                if attempt == 0:
-                    time.sleep(3.0)
-                    continue
-                return {"error": "API Error", "msg": f"HTTP {response.status_code}"}
+                break
 
-            data  = response.json()
-            tasks = data.get("tasks", [])
-            if not tasks:
-                return {"rank": "Not in Top 100", "url": "N/A"}
+            organic = response.json().get("organic", [])
+            if not organic:
+                break
 
-            task   = tasks[0]
-            status = task.get("status_code", 0)
-            if status == 40101:
-                return {"error": "Auth Error", "msg": task.get("status_message", "Auth failed.")}
-            if status not in [20000, 20100]:
-                if attempt == 0:
-                    time.sleep(3.0)
-                    continue
-                return {"rank": "Not in Top 100", "url": "N/A"}
-
-            result = task.get("result", [])
-            if not result:
-                return {"rank": "Not in Top 100", "url": "N/A"}
-
-            items = result[0].get("items", []) or []
-            for item in items:
-                if item.get("type") != "organic":
-                    continue
-                url = item.get("url", "")
-                if domain_matches(url, target_domain):
-                    return {
-                        "rank": item.get("rank_absolute"),
-                        "url":  url,
-                    }
-
-            return {"rank": "Not in Top 100", "url": "N/A"}
+            for result in organic:
+                rank_counter += 1
+                link = result.get("link", "")
+                if domain_matches(link, target_domain):
+                    return {"rank": rank_counter, "url": link}
 
         except Exception as e:
-            if attempt == 0:
-                time.sleep(3.0)
-                continue
-            return {"error": "Error", "msg": str(e)}
+            if page == 1:
+                return {"error": "Error", "msg": str(e)}
+            break
+
+        if page < 10:
+            time.sleep(1.0)
 
     return {"rank": "Not in Top 100", "url": "N/A"}
 
-# ---------------------------------------------------------------------------
-# Styling
-# ---------------------------------------------------------------------------
 def render_styling():
     st.markdown("""
         <style>
@@ -183,7 +144,7 @@ def render_styling():
 def rank_color(val):
     try:
         v = str(val)
-        if "Not in" in v or v in ["N/A", "Error"]:
+        if "Not in" in v or v == "N/A":
             return "background-color: rgba(239,68,68,0.1); color: #ef4444;"
         n = int(v.strip())
         if n <= 3:
@@ -199,9 +160,6 @@ def rank_color(val):
     except Exception:
         return "background-color: transparent; color: #8B949E;"
 
-# ---------------------------------------------------------------------------
-# Main app
-# ---------------------------------------------------------------------------
 def main():
     st.set_page_config(
         page_title="AI Keyword Tracker",
@@ -213,7 +171,7 @@ def main():
     render_styling()
 
     st.title("🎯 AI Keyword Tracker")
-    st.markdown("Real-time Google rank tracking powered by **DataForSEO**")
+    st.markdown("Real-time Google rank tracking powered by Serper.dev")
 
     with st.sidebar:
         st.header("⚙️ Configuration")
@@ -221,16 +179,14 @@ def main():
             "Target Domain",
             placeholder="e.g. agtech.folio3.com",
             value=st.session_state.domain,
-            help="Enter the exact domain or subdomain to track.",
+            help="Enter the exact domain or subdomain — e.g. agtech.folio3.com, not folio3.com",
         )
-
-        dfs_login    = st.text_input("DataForSEO Login (email)", placeholder="you@example.com")
-        dfs_password = st.text_input("DataForSEO Password", type="password")
+        serper_key = st.text_input("Serper.dev API Key", type="password")
 
         with st.expander("Advanced Settings"):
-            location_label = st.selectbox("Location", list(LOCATIONS.keys()), index=0)
-            language       = st.selectbox("Language", ["English", "Spanish", "French", "German"], index=0)
-            device         = st.selectbox("Device",   ["desktop", "mobile"], index=0)
+            country_code  = st.selectbox("Country",  ["us", "uk", "ca", "au", "in", "pk"], index=0)
+            language_code = st.selectbox("Language", ["en", "es", "fr", "de"],              index=0)
+            device_type   = st.selectbox("Device",   ["desktop", "mobile"],                 index=0)
 
         st.divider()
         st.markdown("### 📥 Input Keywords")
@@ -274,41 +230,28 @@ def main():
         if run_btn:
             if not target_domain:
                 st.error("Target Domain is required.")
-            elif not dfs_login or not dfs_password:
-                st.error("DataForSEO login and password are required.")
+            elif not serper_key:
+                st.error("Serper.dev API Key is required.")
             elif not keywords:
                 st.error("Please add keywords to analyze.")
             else:
-                st.session_state.domain       = target_domain
+                st.session_state.domain = target_domain
                 st.session_state.results_data = []
 
                 root_domain   = get_root_domain(target_domain)
-                location_name = LOCATIONS[location_label]
                 progress_text = st.empty()
                 progress_bar  = st.progress(0)
 
                 for i, kv in enumerate(keywords):
                     progress_text.text(f"Scanning: '{kv}'  ({i + 1}/{len(keywords)})")
-                    res = get_search_results(kv, root_domain, dfs_login, dfs_password,
-                                            location_name, language, device)
+                    res = get_search_results(kv, root_domain, serper_key, country_code, language_code, device_type)
 
                     if "error" in res:
-                        if res["error"] in ("Auth Error", "Insufficient Credits"):
-                            st.error(f"{res['error']}: {res['msg']}")
-                            break
-                        st.warning(f"⚠️ Skipped '{kv}': {res['msg']}")
-                        st.session_state.results_data.append({
-                            "Keyword":   kv,
-                            "Rank":      "Error",
-                            "URL":       "N/A",
-                            "Page Type": "N/A",
-                            "Position":  102,
-                        })
-                        progress_bar.progress((i + 1) / len(keywords))
-                        continue
+                        st.error(f"{res['error']}: {res['msg']}")
+                        break
 
-                    rank     = res.get("rank", "Not in Top 100")
-                    url      = res.get("url",  "N/A")
+                    rank = res.get("rank", "Not in Top 100")
+                    url  = res.get("url", "N/A")
                     rank_str = str(rank)
 
                     if rank_str.isdigit():
@@ -329,6 +272,9 @@ def main():
                     })
 
                     progress_bar.progress((i + 1) / len(keywords))
+
+                    if i < len(keywords) - 1:
+                        time.sleep(1.0)
 
                 progress_text.empty()
                 progress_bar.empty()
@@ -405,13 +351,11 @@ def main():
         if not st.session_state.results_data:
             st.info("Run the tracker to view keyword intelligence.")
         else:
+            st.subheader("Keyword Intelligence Data")
             df_display = pd.DataFrame(st.session_state.results_data).drop(columns=["Position"], errors="ignore")
-            total_rows = len(df_display)
-            st.subheader(f"Keyword Intelligence Data ({total_rows} keywords)")
             style_cols = [c for c in ["Rank"] if c in df_display.columns]
             styled = df_display.style.map(rank_color, subset=style_cols)
-            tbl_height = min(total_rows * 35 + 38, 1200)
-            st.dataframe(styled, use_container_width=True, height=tbl_height)
+            st.dataframe(styled, use_container_width=True, height=500)
 
     with tab3:
         st.subheader("Data Export")
