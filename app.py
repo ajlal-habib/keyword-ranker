@@ -1,20 +1,30 @@
 import streamlit as st
 import pandas as pd
+import requests
 import json
+import time
 import plotly.express as px
-from datetime import datetime, timedelta
-from googleapiclient.discovery import build
-from google.oauth2 import service_account
+from urllib.parse import urlparse
 
-COUNTRY_CODES = {
-    "us": "usa",
-    "uk": "gbr",
-    "ca": "can",
-    "au": "aus",
-    "in": "ind",
-    "pk": "pak",
+# ---------------------------------------------------------------------------
+# Location options — DataForSEO accepts exact location_name strings
+# ---------------------------------------------------------------------------
+LOCATIONS = {
+    "United States":                  "United States",
+    "United Kingdom":                 "United Kingdom",
+    "Canada":                         "Canada",
+    "Australia":                      "Australia",
+    "India":                          "India",
+    "Pakistan":                       "Pakistan",
+    "New York, US":                   "New York,New York,United States",
+    "Los Angeles, US":                "Los Angeles,California,United States",
+    "Chicago, US":                    "Chicago,Illinois,United States",
+    "Houston, US":                    "Houston,Texas,United States",
 }
 
+# ---------------------------------------------------------------------------
+# Session state
+# ---------------------------------------------------------------------------
 def init_session_state():
     if "domain" not in st.session_state:
         st.session_state.domain = ""
@@ -22,6 +32,25 @@ def init_session_state():
         st.session_state.results_data = []
     elif st.session_state.results_data and "Rank" not in st.session_state.results_data[0]:
         st.session_state.results_data = []
+
+# ---------------------------------------------------------------------------
+# Domain helpers
+# ---------------------------------------------------------------------------
+def get_root_domain(url_or_domain):
+    s = str(url_or_domain).strip()
+    if not s.startswith(("http://", "https://")):
+        s = "http://" + s
+    try:
+        netloc = urlparse(s).netloc.lower()
+        if netloc.startswith("www."):
+            netloc = netloc[4:]
+        return netloc
+    except Exception:
+        return str(url_or_domain).lower()
+
+def domain_matches(link, target_domain):
+    result_domain = get_root_domain(link)
+    return result_domain == target_domain or result_domain.endswith("." + target_domain)
 
 def determine_page_type(url):
     if not url or url == "N/A":
@@ -31,45 +60,90 @@ def determine_page_type(url):
         return "Blog"
     return "Landing Page"
 
-def build_gsc_service(credentials_info):
-    credentials = service_account.Credentials.from_service_account_info(
-        credentials_info,
-        scopes=["https://www.googleapis.com/auth/webmasters.readonly"]
-    )
-    return build("searchconsole", "v1", credentials=credentials)
+# ---------------------------------------------------------------------------
+# DataForSEO Live API call
+# ---------------------------------------------------------------------------
+def get_search_results(keyword, target_domain, login, password, location, language, device):
+    """
+    Queries DataForSEO Live SERP API.
 
-def get_keyword_ranking(service, site_url, keyword, start_date, end_date, country_code=None, device=None):
-    filters = [{"dimension": "query", "operator": "equals", "expression": keyword}]
-    if country_code:
-        filters.append({"dimension": "country", "operator": "equals", "expression": country_code})
-    if device and device != "all":
-        filters.append({"dimension": "device", "operator": "equals", "expression": device.upper()})
+    Returns rank_absolute — the true visual position on Google including ads,
+    featured snippets, and all other SERP features. One API call covers the
+    full top-100, no pagination needed.
+    """
+    headers = {"Content-Type": "application/json"}
+    payload = json.dumps([{
+        "keyword":       keyword,
+        "location_name": location,
+        "language_name": language,
+        "device":        device,
+        "os":            "windows",
+        "depth":         100,
+    }])
 
-    body = {
-        "startDate": start_date,
-        "endDate": end_date,
-        "dimensions": ["query", "page"],
-        "dimensionFilterGroups": [{"filters": filters}],
-        "rowLimit": 10,
-        "dataState": "final",
-    }
+    for attempt in range(2):
+        try:
+            response = requests.post(
+                "https://api.dataforseo.com/v3/serp/google/organic/live/regular",
+                headers=headers,
+                data=payload,
+                auth=(login, password),
+                timeout=30,
+            )
 
-    try:
-        response = service.searchanalytics().query(siteUrl=site_url, body=body).execute()
-        rows = response.get("rows", [])
-        if not rows:
-            return {"rank": "No Data", "url": "N/A", "clicks": 0, "impressions": 0, "ctr": 0.0}
-        best = min(rows, key=lambda r: r.get("position", 999))
-        return {
-            "rank": round(best.get("position", 0)),
-            "url": best["keys"][1] if len(best["keys"]) > 1 else "N/A",
-            "clicks": int(best.get("clicks", 0)),
-            "impressions": int(best.get("impressions", 0)),
-            "ctr": round(best.get("ctr", 0) * 100, 1),
-        }
-    except Exception as e:
-        return {"error": str(e)}
+            if response.status_code == 401:
+                return {"error": "Auth Error", "msg": "Invalid DataForSEO login or password."}
+            if response.status_code == 402:
+                return {"error": "Insufficient Credits", "msg": "Top up your DataForSEO balance."}
+            if response.status_code != 200:
+                if attempt == 0:
+                    time.sleep(3.0)
+                    continue
+                return {"error": "API Error", "msg": f"HTTP {response.status_code}"}
 
+            data  = response.json()
+            tasks = data.get("tasks", [])
+            if not tasks:
+                return {"rank": "Not in Top 100", "url": "N/A"}
+
+            task   = tasks[0]
+            status = task.get("status_code", 0)
+            if status == 40101:
+                return {"error": "Auth Error", "msg": task.get("status_message", "Auth failed.")}
+            if status not in [20000, 20100]:
+                if attempt == 0:
+                    time.sleep(3.0)
+                    continue
+                return {"rank": "Not in Top 100", "url": "N/A"}
+
+            result = task.get("result", [])
+            if not result:
+                return {"rank": "Not in Top 100", "url": "N/A"}
+
+            items = result[0].get("items", []) or []
+            for item in items:
+                if item.get("type") != "organic":
+                    continue
+                url = item.get("url", "")
+                if domain_matches(url, target_domain):
+                    return {
+                        "rank": item.get("rank_absolute"),
+                        "url":  url,
+                    }
+
+            return {"rank": "Not in Top 100", "url": "N/A"}
+
+        except Exception as e:
+            if attempt == 0:
+                time.sleep(3.0)
+                continue
+            return {"error": "Error", "msg": str(e)}
+
+    return {"rank": "Not in Top 100", "url": "N/A"}
+
+# ---------------------------------------------------------------------------
+# Styling
+# ---------------------------------------------------------------------------
 def render_styling():
     st.markdown("""
         <style>
@@ -109,7 +183,7 @@ def render_styling():
 def rank_color(val):
     try:
         v = str(val)
-        if v in ["No Data", "N/A", "Error"]:
+        if "Not in" in v or v in ["N/A", "Error"]:
             return "background-color: rgba(239,68,68,0.1); color: #ef4444;"
         n = int(v.strip())
         if n <= 3:
@@ -125,6 +199,9 @@ def rank_color(val):
     except Exception:
         return "background-color: transparent; color: #8B949E;"
 
+# ---------------------------------------------------------------------------
+# Main app
+# ---------------------------------------------------------------------------
 def main():
     st.set_page_config(
         page_title="AI Keyword Tracker",
@@ -136,32 +213,24 @@ def main():
     render_styling()
 
     st.title("🎯 AI Keyword Tracker")
-    st.markdown("Rank tracking powered by **Google Search Console** — 100% accurate Google data")
+    st.markdown("Real-time Google rank tracking powered by **DataForSEO**")
 
     with st.sidebar:
         st.header("⚙️ Configuration")
-
-        site_url = st.text_input(
-            "GSC Property URL",
-            placeholder="https://agtech.folio3.com/",
+        target_domain = st.text_input(
+            "Target Domain",
+            placeholder="e.g. agtech.folio3.com",
             value=st.session_state.domain,
-            help="Must match exactly as it appears in Google Search Console, including trailing slash.",
+            help="Enter the exact domain or subdomain to track.",
         )
 
-        st.markdown("**Service Account Credentials**")
-        creds_file = st.file_uploader("Upload service account JSON", type=["json"])
-        credentials_info = None
-        if creds_file:
-            try:
-                credentials_info = json.load(creds_file)
-                st.success("✓ Credentials loaded")
-            except Exception as e:
-                st.error(f"Invalid JSON: {e}")
+        dfs_login    = st.text_input("DataForSEO Login (email)", placeholder="you@example.com")
+        dfs_password = st.text_input("DataForSEO Password", type="password")
 
         with st.expander("Advanced Settings"):
-            country_option  = st.selectbox("Country",     ["us", "uk", "ca", "au", "in", "pk"],            index=0)
-            date_range      = st.selectbox("Date Range",  ["Last 7 days", "Last 28 days", "Last 3 months"], index=1)
-            device_option   = st.selectbox("Device",      ["all", "desktop", "mobile", "tablet"],           index=0)
+            location_label = st.selectbox("Location", list(LOCATIONS.keys()), index=0)
+            language       = st.selectbox("Language", ["English", "Spanish", "French", "German"], index=0)
+            device         = st.selectbox("Device",   ["desktop", "mobile"], index=0)
 
         st.divider()
         st.markdown("### 📥 Input Keywords")
@@ -203,67 +272,62 @@ def main():
         run_btn = st.button("🚀 Analyze SERP", type="primary", use_container_width=True)
 
         if run_btn:
-            if not site_url:
-                st.error("GSC Property URL is required.")
-            elif not credentials_info:
-                st.error("Service account credentials are required.")
+            if not target_domain:
+                st.error("Target Domain is required.")
+            elif not dfs_login or not dfs_password:
+                st.error("DataForSEO login and password are required.")
             elif not keywords:
                 st.error("Please add keywords to analyze.")
             else:
-                st.session_state.domain = site_url
+                st.session_state.domain       = target_domain
                 st.session_state.results_data = []
 
-                end_date = (datetime.today() - timedelta(days=3)).strftime("%Y-%m-%d")
-                days_map = {"Last 7 days": 10, "Last 28 days": 31, "Last 3 months": 93}
-                start_date = (datetime.today() - timedelta(days=days_map[date_range])).strftime("%Y-%m-%d")
-
-                country_code = COUNTRY_CODES.get(country_option)
-
-                try:
-                    gsc_service = build_gsc_service(credentials_info)
-                except Exception as e:
-                    st.error(f"Authentication failed: {e}")
-                    st.stop()
-
+                root_domain   = get_root_domain(target_domain)
+                location_name = LOCATIONS[location_label]
                 progress_text = st.empty()
                 progress_bar  = st.progress(0)
 
                 for i, kv in enumerate(keywords):
                     progress_text.text(f"Scanning: '{kv}'  ({i + 1}/{len(keywords)})")
-                    res = get_keyword_ranking(gsc_service, site_url, kv, start_date, end_date, country_code, device_option)
+                    res = get_search_results(kv, root_domain, dfs_login, dfs_password,
+                                            location_name, language, device)
 
                     if "error" in res:
-                        st.warning(f"⚠️ Error for '{kv}': {res['error']}")
+                        if res["error"] in ("Auth Error", "Insufficient Credits"):
+                            st.error(f"{res['error']}: {res['msg']}")
+                            break
+                        st.warning(f"⚠️ Skipped '{kv}': {res['msg']}")
                         st.session_state.results_data.append({
-                            "Keyword": kv, "Rank": "Error", "URL": "N/A",
-                            "Page Type": "N/A", "Clicks": 0, "Impressions": 0, "CTR (%)": 0.0,
-                            "Position": 102,
+                            "Keyword":   kv,
+                            "Rank":      "Error",
+                            "URL":       "N/A",
+                            "Page Type": "N/A",
+                            "Position":  102,
                         })
                         progress_bar.progress((i + 1) / len(keywords))
                         continue
 
-                    rank = res["rank"]
-                    url  = res["url"]
+                    rank     = res.get("rank", "Not in Top 100")
+                    url      = res.get("url",  "N/A")
+                    rank_str = str(rank)
 
-                    if isinstance(rank, int):
-                        display_rank = str(rank)
-                        position     = rank
+                    if rank_str.isdigit():
+                        display_rank = rank_str
+                        position     = int(rank_str)
                         page_type    = determine_page_type(url)
                     else:
-                        display_rank = "No Data"
+                        display_rank = "Not in Top 100"
                         position     = 101
                         page_type    = "N/A"
 
                     st.session_state.results_data.append({
-                        "Keyword":      kv,
-                        "Rank":         display_rank,
-                        "URL":          url,
-                        "Page Type":    page_type,
-                        "Clicks":       res["clicks"],
-                        "Impressions":  res["impressions"],
-                        "CTR (%)":      res["ctr"],
-                        "Position":     position,
+                        "Keyword":   kv,
+                        "Rank":      display_rank,
+                        "URL":       url,
+                        "Page Type": page_type,
+                        "Position":  position,
                     })
+
                     progress_bar.progress((i + 1) / len(keywords))
 
                 progress_text.empty()
@@ -280,14 +344,12 @@ def main():
             all_pos = df_res["Position"].tolist()
             ranked  = [p for p in all_pos if p <= 100]
 
-            total_kw        = len(df_res)
-            top_3           = sum(1 for p in all_pos if p <= 3)
-            top_10          = sum(1 for p in all_pos if p <= 10)
-            top_100         = sum(1 for p in all_pos if p <= 100)
-            avg_pos         = sum(ranked) / len(ranked) if ranked else None
-            visibility      = round(top_10 / total_kw * 100, 1) if total_kw else 0
-            total_clicks    = int(df_res["Clicks"].sum())
-            total_impressions = int(df_res["Impressions"].sum())
+            total_kw   = len(df_res)
+            top_3      = sum(1 for p in all_pos if p <= 3)
+            top_10     = sum(1 for p in all_pos if p <= 10)
+            top_100    = sum(1 for p in all_pos if p <= 100)
+            avg_pos    = sum(ranked) / len(ranked) if ranked else None
+            visibility = round(top_10 / total_kw * 100, 1) if total_kw else 0
 
             col1, col2, col3, col4 = st.columns(4)
             with col1:
@@ -295,14 +357,8 @@ def main():
             with col2:
                 st.markdown(f'<div class="metric-container"><div class="metric-label">Top 3 Rankings</div><div class="metric-value">{top_3}</div></div>', unsafe_allow_html=True)
             with col3:
-                st.markdown(f'<div class="metric-container"><div class="metric-label">Total Clicks</div><div class="metric-value">{total_clicks:,}</div></div>', unsafe_allow_html=True)
-            with col4:
-                st.markdown(f'<div class="metric-container"><div class="metric-label">Total Impressions</div><div class="metric-value">{total_impressions:,}</div></div>', unsafe_allow_html=True)
-
-            col5, col6 = st.columns(2)
-            with col5:
                 st.markdown(f'<div class="metric-container"><div class="metric-label">Top 10 Rankings</div><div class="metric-value">{top_10}</div></div>', unsafe_allow_html=True)
-            with col6:
+            with col4:
                 avg_display = f"{avg_pos:.1f}" if avg_pos is not None else "N/A"
                 st.markdown(f'<div class="metric-container"><div class="metric-label">Avg Position</div><div class="metric-value">{avg_display}</div></div>', unsafe_allow_html=True)
 
@@ -316,7 +372,7 @@ def main():
                     "Pos 4-10":   top_10 - top_3,
                     "Pos 11-30":  sum(1 for p in all_pos if 10 < p <= 30),
                     "Pos 31-100": sum(1 for p in all_pos if 30 < p <= 100),
-                    "No Data":    total_kw - top_100,
+                    "Not Ranked": total_kw - top_100,
                 }
                 fig = px.bar(
                     pd.DataFrame(list(dist.items()), columns=["Range", "Count"]),
@@ -364,11 +420,10 @@ def main():
         else:
             df_export = pd.DataFrame(st.session_state.results_data).drop(columns=["Position"], errors="ignore")
             csv = df_export.to_csv(index=False).encode("utf-8")
-            safe_name = st.session_state.domain.replace("https://", "").replace("/", "_").replace(".", "_")
             st.download_button(
                 label="📥 Download Report (CSV)",
                 data=csv,
-                file_name=f"{safe_name}_rankings.csv",
+                file_name=f"{st.session_state.domain.replace('.', '_')}_rankings.csv",
                 mime="text/csv",
                 type="primary",
             )
