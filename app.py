@@ -1,36 +1,27 @@
 import streamlit as st
 import pandas as pd
-import requests
 import json
-import time
 import plotly.express as px
-from urllib.parse import urlparse
+from datetime import datetime, timedelta
+from googleapiclient.discovery import build
+from google.oauth2 import service_account
+
+COUNTRY_CODES = {
+    "us": "usa",
+    "uk": "gbr",
+    "ca": "can",
+    "au": "aus",
+    "in": "ind",
+    "pk": "pak",
+}
 
 def init_session_state():
     if "domain" not in st.session_state:
         st.session_state.domain = ""
-    # Clear stale results from older schema versions
-    existing = st.session_state.get("results_data", [])
-    if existing and "Rank" not in existing[0]:
+    if "results_data" not in st.session_state:
         st.session_state.results_data = []
-    elif "results_data" not in st.session_state:
+    elif st.session_state.results_data and "Rank" not in st.session_state.results_data[0]:
         st.session_state.results_data = []
-
-def get_root_domain(url_or_domain):
-    s = str(url_or_domain).strip()
-    if not s.startswith(("http://", "https://")):
-        s = "http://" + s
-    try:
-        netloc = urlparse(s).netloc.lower()
-        if netloc.startswith("www."):
-            netloc = netloc[4:]
-        return netloc
-    except Exception:
-        return str(url_or_domain).lower()
-
-def domain_matches(link, target_domain):
-    result_domain = get_root_domain(link)
-    return result_domain == target_domain or result_domain.endswith("." + target_domain)
 
 def determine_page_type(url):
     if not url or url == "N/A":
@@ -40,63 +31,44 @@ def determine_page_type(url):
         return "Blog"
     return "Landing Page"
 
-def _fetch_page(keyword, page, api_key, gl, hl, device):
-    """Fetch one page from Serper.dev, retrying once on transient failures."""
-    headers = {"X-API-KEY": api_key, "Content-Type": "application/json"}
-    payload = json.dumps({"q": keyword, "gl": gl, "hl": hl, "page": page, "num": 10, "device": device})
+def build_gsc_service(credentials_info):
+    credentials = service_account.Credentials.from_service_account_info(
+        credentials_info,
+        scopes=["https://www.googleapis.com/auth/webmasters.readonly"]
+    )
+    return build("searchconsole", "v1", credentials=credentials)
 
-    for attempt in range(2):
-        try:
-            r = requests.post("https://google.serper.dev/search", headers=headers, data=payload, timeout=15)
-            if r.status_code == 403:
-                return {"error": "API Key Error", "msg": "Unauthorized — check your Serper.dev API key."}
-            if r.status_code in [402, 429]:
-                return {"error": "Rate Limited", "msg": "Serper.dev rate limit hit. Reduce keywords or upgrade plan."}
-            if r.status_code != 200:
-                if attempt == 0:
-                    time.sleep(2.0)
-                    continue
-                return {"organic": []}
-            organic = r.json().get("organic", [])
-            if organic:
-                return {"organic": organic}
-            # Empty but valid response — retry once in case of transient issue
-            if attempt == 0:
-                time.sleep(2.0)
-                continue
-            return {"organic": []}
-        except Exception as e:
-            if attempt == 0:
-                time.sleep(2.0)
-                continue
-            return {"error": "Error", "msg": str(e)} if page == 1 else {"organic": []}
+def get_keyword_ranking(service, site_url, keyword, start_date, end_date, country_code=None, device=None):
+    filters = [{"dimension": "query", "operator": "equals", "expression": keyword}]
+    if country_code:
+        filters.append({"dimension": "country", "operator": "equals", "expression": country_code})
+    if device and device != "all":
+        filters.append({"dimension": "device", "operator": "equals", "expression": device.upper()})
 
-    return {"organic": []}
+    body = {
+        "startDate": start_date,
+        "endDate": end_date,
+        "dimensions": ["query", "page"],
+        "dimensionFilterGroups": [{"filters": filters}],
+        "rowLimit": 10,
+        "dataState": "final",
+    }
 
-
-def get_search_results(keyword, target_domain, api_key, gl="us", hl="en", device="desktop"):
-    rank_counter = 0
-
-    for page in range(1, 11):
-        result = _fetch_page(keyword, page, api_key, gl, hl, device)
-
-        if "error" in result:
-            return result
-
-        organic = result.get("organic", [])
-        if not organic:
-            break
-
-        for item in organic:
-            rank_counter += 1
-            link = item.get("link", "")
-            if domain_matches(link, target_domain):
-                return {"rank": rank_counter, "url": link}
-
-        if page < 10:
-            time.sleep(1.0)
-
-    return {"rank": "Not in Top 100", "url": "N/A"}
+    try:
+        response = service.searchanalytics().query(siteUrl=site_url, body=body).execute()
+        rows = response.get("rows", [])
+        if not rows:
+            return {"rank": "No Data", "url": "N/A", "clicks": 0, "impressions": 0, "ctr": 0.0}
+        best = min(rows, key=lambda r: r.get("position", 999))
+        return {
+            "rank": round(best.get("position", 0)),
+            "url": best["keys"][1] if len(best["keys"]) > 1 else "N/A",
+            "clicks": int(best.get("clicks", 0)),
+            "impressions": int(best.get("impressions", 0)),
+            "ctr": round(best.get("ctr", 0) * 100, 1),
+        }
+    except Exception as e:
+        return {"error": str(e)}
 
 def render_styling():
     st.markdown("""
@@ -137,7 +109,7 @@ def render_styling():
 def rank_color(val):
     try:
         v = str(val)
-        if "Not in" in v or v == "N/A":
+        if v in ["No Data", "N/A", "Error"]:
             return "background-color: rgba(239,68,68,0.1); color: #ef4444;"
         n = int(v.strip())
         if n <= 3:
@@ -164,22 +136,32 @@ def main():
     render_styling()
 
     st.title("🎯 AI Keyword Tracker")
-    st.markdown("Real-time Google rank tracking")
+    st.markdown("Rank tracking powered by **Google Search Console** — 100% accurate Google data")
 
     with st.sidebar:
         st.header("⚙️ Configuration")
-        target_domain = st.text_input(
-            "Target Domain",
-            placeholder="e.g. domain.com",
+
+        site_url = st.text_input(
+            "GSC Property URL",
+            placeholder="https://agtech.folio3.com/",
             value=st.session_state.domain,
-            help="Enter the exact domain or subdomain — e.g. agtech.folio3.com, not folio3.com",
+            help="Must match exactly as it appears in Google Search Console, including trailing slash.",
         )
-        serper_key = st.text_input("Serper.dev API Key", type="password")
+
+        st.markdown("**Service Account Credentials**")
+        creds_file = st.file_uploader("Upload service account JSON", type=["json"])
+        credentials_info = None
+        if creds_file:
+            try:
+                credentials_info = json.load(creds_file)
+                st.success("✓ Credentials loaded")
+            except Exception as e:
+                st.error(f"Invalid JSON: {e}")
 
         with st.expander("Advanced Settings"):
-            country_code  = st.selectbox("Country",  ["us", "uk", "ca", "au", "in", "pk"], index=0)
-            language_code = st.selectbox("Language", ["en", "es", "fr", "de"],              index=0)
-            device_type   = st.selectbox("Device",   ["desktop", "mobile"],                 index=0)
+            country_option  = st.selectbox("Country",     ["us", "uk", "ca", "au", "in", "pk"],            index=0)
+            date_range      = st.selectbox("Date Range",  ["Last 7 days", "Last 28 days", "Last 3 months"], index=1)
+            device_option   = st.selectbox("Device",      ["all", "desktop", "mobile", "tablet"],           index=0)
 
         st.divider()
         st.markdown("### 📥 Input Keywords")
@@ -221,53 +203,68 @@ def main():
         run_btn = st.button("🚀 Analyze SERP", type="primary", use_container_width=True)
 
         if run_btn:
-            if not target_domain:
-                st.error("Target Domain is required.")
-            elif not serper_key:
-                st.error("Serper.dev API Key is required.")
+            if not site_url:
+                st.error("GSC Property URL is required.")
+            elif not credentials_info:
+                st.error("Service account credentials are required.")
             elif not keywords:
                 st.error("Please add keywords to analyze.")
             else:
-                st.session_state.domain = target_domain
+                st.session_state.domain = site_url
                 st.session_state.results_data = []
 
-                root_domain   = get_root_domain(target_domain)
+                end_date = (datetime.today() - timedelta(days=3)).strftime("%Y-%m-%d")
+                days_map = {"Last 7 days": 10, "Last 28 days": 31, "Last 3 months": 93}
+                start_date = (datetime.today() - timedelta(days=days_map[date_range])).strftime("%Y-%m-%d")
+
+                country_code = COUNTRY_CODES.get(country_option)
+
+                try:
+                    gsc_service = build_gsc_service(credentials_info)
+                except Exception as e:
+                    st.error(f"Authentication failed: {e}")
+                    st.stop()
+
                 progress_text = st.empty()
                 progress_bar  = st.progress(0)
 
                 for i, kv in enumerate(keywords):
                     progress_text.text(f"Scanning: '{kv}'  ({i + 1}/{len(keywords)})")
-                    res = get_search_results(kv, root_domain, serper_key, country_code, language_code, device_type)
+                    res = get_keyword_ranking(gsc_service, site_url, kv, start_date, end_date, country_code, device_option)
 
                     if "error" in res:
-                        st.error(f"{res['error']}: {res['msg']}")
-                        break
+                        st.warning(f"⚠️ Error for '{kv}': {res['error']}")
+                        st.session_state.results_data.append({
+                            "Keyword": kv, "Rank": "Error", "URL": "N/A",
+                            "Page Type": "N/A", "Clicks": 0, "Impressions": 0, "CTR (%)": 0.0,
+                            "Position": 102,
+                        })
+                        progress_bar.progress((i + 1) / len(keywords))
+                        continue
 
-                    rank = res.get("rank", "Not in Top 100")
-                    url  = res.get("url", "N/A")
-                    rank_str = str(rank)
+                    rank = res["rank"]
+                    url  = res["url"]
 
-                    if rank_str.isdigit():
-                        display_rank = rank_str
-                        position     = int(rank_str)
+                    if isinstance(rank, int):
+                        display_rank = str(rank)
+                        position     = rank
                         page_type    = determine_page_type(url)
                     else:
-                        display_rank = "Not in Top 100"
+                        display_rank = "No Data"
                         position     = 101
                         page_type    = "N/A"
 
                     st.session_state.results_data.append({
-                        "Keyword":   kv,
-                        "Rank":      display_rank,
-                        "URL":       url,
-                        "Page Type": page_type,
-                        "Position":  position,
+                        "Keyword":      kv,
+                        "Rank":         display_rank,
+                        "URL":          url,
+                        "Page Type":    page_type,
+                        "Clicks":       res["clicks"],
+                        "Impressions":  res["impressions"],
+                        "CTR (%)":      res["ctr"],
+                        "Position":     position,
                     })
-
                     progress_bar.progress((i + 1) / len(keywords))
-
-                    if i < len(keywords) - 1:
-                        time.sleep(1.0)
 
                 progress_text.empty()
                 progress_bar.empty()
@@ -283,12 +280,14 @@ def main():
             all_pos = df_res["Position"].tolist()
             ranked  = [p for p in all_pos if p <= 100]
 
-            total_kw   = len(df_res)
-            top_3      = sum(1 for p in all_pos if p <= 3)
-            top_10     = sum(1 for p in all_pos if p <= 10)
-            top_100    = sum(1 for p in all_pos if p <= 100)
-            avg_pos    = sum(ranked) / len(ranked) if ranked else None
-            visibility = round(top_10 / total_kw * 100, 1) if total_kw else 0
+            total_kw        = len(df_res)
+            top_3           = sum(1 for p in all_pos if p <= 3)
+            top_10          = sum(1 for p in all_pos if p <= 10)
+            top_100         = sum(1 for p in all_pos if p <= 100)
+            avg_pos         = sum(ranked) / len(ranked) if ranked else None
+            visibility      = round(top_10 / total_kw * 100, 1) if total_kw else 0
+            total_clicks    = int(df_res["Clicks"].sum())
+            total_impressions = int(df_res["Impressions"].sum())
 
             col1, col2, col3, col4 = st.columns(4)
             with col1:
@@ -296,8 +295,14 @@ def main():
             with col2:
                 st.markdown(f'<div class="metric-container"><div class="metric-label">Top 3 Rankings</div><div class="metric-value">{top_3}</div></div>', unsafe_allow_html=True)
             with col3:
-                st.markdown(f'<div class="metric-container"><div class="metric-label">Top 10 Rankings</div><div class="metric-value">{top_10}</div></div>', unsafe_allow_html=True)
+                st.markdown(f'<div class="metric-container"><div class="metric-label">Total Clicks</div><div class="metric-value">{total_clicks:,}</div></div>', unsafe_allow_html=True)
             with col4:
+                st.markdown(f'<div class="metric-container"><div class="metric-label">Total Impressions</div><div class="metric-value">{total_impressions:,}</div></div>', unsafe_allow_html=True)
+
+            col5, col6 = st.columns(2)
+            with col5:
+                st.markdown(f'<div class="metric-container"><div class="metric-label">Top 10 Rankings</div><div class="metric-value">{top_10}</div></div>', unsafe_allow_html=True)
+            with col6:
                 avg_display = f"{avg_pos:.1f}" if avg_pos is not None else "N/A"
                 st.markdown(f'<div class="metric-container"><div class="metric-label">Avg Position</div><div class="metric-value">{avg_display}</div></div>', unsafe_allow_html=True)
 
@@ -311,7 +316,7 @@ def main():
                     "Pos 4-10":   top_10 - top_3,
                     "Pos 11-30":  sum(1 for p in all_pos if 10 < p <= 30),
                     "Pos 31-100": sum(1 for p in all_pos if 30 < p <= 100),
-                    "Not Ranked": total_kw - top_100,
+                    "No Data":    total_kw - top_100,
                 }
                 fig = px.bar(
                     pd.DataFrame(list(dist.items()), columns=["Range", "Count"]),
@@ -344,11 +349,13 @@ def main():
         if not st.session_state.results_data:
             st.info("Run the tracker to view keyword intelligence.")
         else:
-            st.subheader("Keyword Intelligence Data")
             df_display = pd.DataFrame(st.session_state.results_data).drop(columns=["Position"], errors="ignore")
+            total_rows = len(df_display)
+            st.subheader(f"Keyword Intelligence Data ({total_rows} keywords)")
             style_cols = [c for c in ["Rank"] if c in df_display.columns]
             styled = df_display.style.map(rank_color, subset=style_cols)
-            st.dataframe(styled, use_container_width=True, height=500)
+            tbl_height = min(total_rows * 35 + 38, 1200)
+            st.dataframe(styled, use_container_width=True, height=tbl_height)
 
     with tab3:
         st.subheader("Data Export")
@@ -357,10 +364,11 @@ def main():
         else:
             df_export = pd.DataFrame(st.session_state.results_data).drop(columns=["Position"], errors="ignore")
             csv = df_export.to_csv(index=False).encode("utf-8")
+            safe_name = st.session_state.domain.replace("https://", "").replace("/", "_").replace(".", "_")
             st.download_button(
                 label="📥 Download Report (CSV)",
                 data=csv,
-                file_name=f"{st.session_state.domain.replace('.', '_')}_rankings.csv",
+                file_name=f"{safe_name}_rankings.csv",
                 mime="text/csv",
                 type="primary",
             )
