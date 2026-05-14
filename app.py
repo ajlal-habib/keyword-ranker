@@ -40,65 +40,58 @@ def determine_page_type(url):
         return "Blog"
     return "Landing Page"
 
+def _fetch_page(keyword, page, api_key, gl, hl, device):
+    """Fetch one page from Serper.dev, retrying once on transient failures."""
+    headers = {"X-API-KEY": api_key, "Content-Type": "application/json"}
+    payload = json.dumps({"q": keyword, "gl": gl, "hl": hl, "page": page, "num": 10, "device": device})
+
+    for attempt in range(2):
+        try:
+            r = requests.post("https://google.serper.dev/search", headers=headers, data=payload, timeout=15)
+            if r.status_code == 403:
+                return {"error": "API Key Error", "msg": "Unauthorized — check your Serper.dev API key."}
+            if r.status_code in [402, 429]:
+                return {"error": "Rate Limited", "msg": "Serper.dev rate limit hit. Reduce keywords or upgrade plan."}
+            if r.status_code != 200:
+                if attempt == 0:
+                    time.sleep(2.0)
+                    continue
+                return {"organic": []}
+            organic = r.json().get("organic", [])
+            if organic:
+                return {"organic": organic}
+            # Empty but valid response — retry once in case of transient issue
+            if attempt == 0:
+                time.sleep(2.0)
+                continue
+            return {"organic": []}
+        except Exception as e:
+            if attempt == 0:
+                time.sleep(2.0)
+                continue
+            return {"error": "Error", "msg": str(e)} if page == 1 else {"organic": []}
+
+    return {"organic": []}
+
+
 def get_search_results(keyword, target_domain, api_key, gl="us", hl="en", device="desktop"):
-    """
-    Scans top 100 Google results (10 pages x 10) via Serper.dev.
-
-    Uses a cumulative rank_counter — increments once per organic result
-    received across all pages. This is the most reliable position method
-    because Serper.dev's own `position` field resets to 1-10 on each page
-    and adding a location parameter changes which Google datacenter is hit,
-    producing different (less consistent) results.
-
-    1 second between pages keeps requests within Serper.dev rate limits.
-    Without this pause, later pages fail silently and ranks look too low.
-    """
-    headers = {
-        "X-API-KEY": api_key,
-        "Content-Type": "application/json",
-    }
-
     rank_counter = 0
 
     for page in range(1, 11):
-        payload = json.dumps({
-            "q": keyword,
-            "gl": gl,
-            "hl": hl,
-            "page": page,
-            "num": 10,
-            "device": device,
-        })
+        result = _fetch_page(keyword, page, api_key, gl, hl, device)
 
-        try:
-            response = requests.post(
-                "https://google.serper.dev/search",
-                headers=headers,
-                data=payload,
-                timeout=15,
-            )
+        if "error" in result:
+            return result
 
-            if response.status_code == 403:
-                return {"error": "API Key Error", "msg": "Unauthorized — check your Serper.dev API key."}
-            if response.status_code in [402, 429]:
-                return {"error": "Rate Limited", "msg": "Serper.dev rate limit hit. Reduce keywords or upgrade plan."}
-            if response.status_code != 200:
-                break
-
-            organic = response.json().get("organic", [])
-            if not organic:
-                break
-
-            for result in organic:
-                rank_counter += 1
-                link = result.get("link", "")
-                if domain_matches(link, target_domain):
-                    return {"rank": rank_counter, "url": link}
-
-        except Exception as e:
-            if page == 1:
-                return {"error": "Error", "msg": str(e)}
+        organic = result.get("organic", [])
+        if not organic:
             break
+
+        for item in organic:
+            rank_counter += 1
+            link = item.get("link", "")
+            if domain_matches(link, target_domain):
+                return {"rank": rank_counter, "url": link}
 
         if page < 10:
             time.sleep(1.0)
@@ -171,13 +164,13 @@ def main():
     render_styling()
 
     st.title("🎯 AI Keyword Tracker")
-    st.markdown("Real-time Google rank tracking powered by Serper.dev")
+    st.markdown("Real-time Google rank tracking")
 
     with st.sidebar:
         st.header("⚙️ Configuration")
         target_domain = st.text_input(
             "Target Domain",
-            placeholder="e.g. agtech.folio3.com",
+            placeholder="e.g. domain.com",
             value=st.session_state.domain,
             help="Enter the exact domain or subdomain — e.g. agtech.folio3.com, not folio3.com",
         )
